@@ -1,4 +1,9 @@
 import type { NanoniRendererInitScriptOptions } from "./types.ts";
+import {
+  NANONI_BRIDGE_CHANNELS,
+  NANONI_PUSH_CHANNELS,
+  NANONI_SSH_PASSWORD_PROMPT_CANCELLED_RESULT,
+} from "./bridge.ts";
 
 const DEFAULT_INVOKE_COMMAND = "host_invoke";
 const DEFAULT_EVENTS_COMMAND = "desktop_events";
@@ -43,6 +48,12 @@ export const createNanoniInitScript = (options: NanoniRendererInitScriptOptions)
   const eventsCommand = serializeScriptValue(
     options.eventsCommand ?? DEFAULT_EVENTS_COMMAND,
     "events command",
+  );
+  const bridgeChannels = serializeScriptValue(NANONI_BRIDGE_CHANNELS, "bridge channels");
+  const pushChannels = serializeScriptValue(NANONI_PUSH_CHANNELS, "push channels");
+  const sshPasswordPromptCancelledResult = serializeScriptValue(
+    NANONI_SSH_PASSWORD_PROMPT_CANCELLED_RESULT,
+    "SSH cancellation result type",
   );
 
   return `(() => {
@@ -150,7 +161,10 @@ export const createNanoniInitScript = (options: NanoniRendererInitScriptOptions)
     };
     eventsReady = Promise.resolve(internals.invoke(${eventsCommand}, { channel: eventChannel }))
       .then(() => true)
-      .catch(() => false);
+      .catch(() => {
+        cleanupCallback();
+        return false;
+      });
   }
 
   const invoke = (channel, payload) => {
@@ -163,12 +177,94 @@ export const createNanoniInitScript = (options: NanoniRendererInitScriptOptions)
     });
   };
 
+  const channels = ${bridgeChannels};
+  const pushChannels = ${pushChannels};
+  const call = (method, payload) => invoke(channels[method], payload);
+  const onObject = (channel, listener) =>
+    onPush(channel, (value) => {
+      if (value === null || typeof value !== "object") return;
+      listener(value);
+    });
+  const ensureSshEnvironment = async (target, options) => {
+    const result = await call("ensureSshEnvironment", {
+      target,
+      ...(options === undefined ? {} : { options }),
+    });
+    if (
+      result !== null &&
+      typeof result === "object" &&
+      result.type === ${sshPasswordPromptCancelledResult}
+    ) {
+      const message = typeof result.message === "string" ? result.message : "SSH authentication cancelled.";
+      throw new Error(message);
+    }
+    return result;
+  };
+
   const bridge = Object.freeze({
     getAppBranding: () => sync.appBranding,
     getSystemLocale: () => sync.systemLocale,
     getLocalEnvironmentBootstraps: () => sync.localEnvironmentBootstraps,
-    invoke,
-    on: onPush,
+    getLocalEnvironmentBearerToken: () => call("getLocalEnvironmentBearerToken", null),
+    getClientSettings: () => call("getClientSettings", null),
+    setClientSettings: (settings) => call("setClientSettings", settings),
+    getConnectionCatalog: () => call("getConnectionCatalog", null),
+    setConnectionCatalog: (catalog) => call("setConnectionCatalog", catalog),
+    clearConnectionCatalog: () => call("clearConnectionCatalog", null),
+    discoverSshHosts: () => call("discoverSshHosts", null),
+    ensureSshEnvironment,
+    disconnectSshEnvironment: (target) => call("disconnectSshEnvironment", target),
+    fetchSshEnvironmentDescriptor: (httpBaseUrl) =>
+      call("fetchSshEnvironmentDescriptor", { httpBaseUrl }),
+    bootstrapSshBearerSession: (httpBaseUrl, credential) =>
+      call("bootstrapSshBearerSession", { httpBaseUrl, credential }),
+    fetchSshSessionState: (httpBaseUrl, bearerToken) =>
+      call("fetchSshSessionState", { httpBaseUrl, bearerToken }),
+    issueSshWebSocketTicket: (httpBaseUrl, bearerToken) =>
+      call("issueSshWebSocketTicket", { httpBaseUrl, bearerToken }),
+    onSshPasswordPrompt: (listener) => onObject(pushChannels.onSshPasswordPrompt, listener),
+    resolveSshPasswordPrompt: (requestId, password) =>
+      call("resolveSshPasswordPrompt", { requestId, password }),
+    getServerExposureState: () => call("getServerExposureState", null),
+    setServerExposureMode: (mode) => call("setServerExposureMode", mode),
+    setTailscaleServeEnabled: (input) => call("setTailscaleServeEnabled", input),
+    getAdvertisedEndpoints: () => call("getAdvertisedEndpoints", null),
+    getWslState: () => call("getWslState", null),
+    setWslBackendEnabled: (enabled) => call("setWslBackendEnabled", enabled),
+    setWslDistro: (distro) => call("setWslDistro", distro),
+    setWslOnly: (enabled) => call("setWslOnly", enabled),
+    pickFolder: (options) => call("pickFolder", options === undefined ? {} : options),
+    pickThemeFiles: () => call("pickThemeFiles", null),
+    setTheme: (theme) => call("setTheme", theme),
+    showContextMenu: (items, position) =>
+      call("showContextMenu", {
+        items,
+        ...(position === undefined ? {} : { position }),
+      }),
+    openExternal: (url) => call("openExternal", url),
+    probeRemoteEditors: () => call("probeRemoteEditors", null),
+    onMenuAction: (listener) =>
+      onPush(pushChannels.onMenuAction, (action) => {
+        if (typeof action !== "string") return;
+        listener(action);
+      }),
+    onQuitShortcut: (listener) =>
+      onPush(pushChannels.onQuitShortcut, (state) => {
+        if (state !== "down" && state !== "up") return;
+        listener(state);
+      }),
+    getWindowFullscreenState: () => sync.windowFullscreenState === true,
+    onWindowFullscreenStateChange: (listener) =>
+      onPush(pushChannels.onWindowFullscreenStateChange, (fullscreen) => {
+        if (typeof fullscreen !== "boolean") return;
+        listener(fullscreen);
+      }),
+    getUpdateState: () => call("getUpdateState", null),
+    setUpdateChannel: (channel) => call("setUpdateChannel", channel),
+    checkForUpdate: () => call("checkForUpdate", null),
+    downloadUpdate: () => call("downloadUpdate", null),
+    installUpdate: () => call("installUpdate", null),
+    onUpdateState: (listener) => onObject(pushChannels.onUpdateState, listener),
   });
   Object.defineProperty(root, "desktopBridge", {
     configurable: false,

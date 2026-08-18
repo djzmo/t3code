@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 
 import { createNanoniInitScript } from "./initScript.ts";
+import { NANONI_BRIDGE_CHANNELS, NANONI_PUSH_CHANNELS } from "./bridge.ts";
 
 type Callback = (value: unknown) => void;
 
@@ -36,6 +37,7 @@ const runInitScript = (window: Record<string, unknown>): void => {
     sync: {
       appBranding: { baseName: "Agent Nanoni", stageLabel: "Dev", displayName: "Agent Nanoni" },
       systemLocale: "fr-FR",
+      windowFullscreenState: true,
       localEnvironmentBootstraps: [
         {
           id: "primary",
@@ -63,6 +65,7 @@ describe("Nanoni renderer init script", () => {
       getAppBranding: () => unknown;
       getSystemLocale: () => unknown;
       getLocalEnvironmentBootstraps: () => unknown;
+      getWindowFullscreenState: () => boolean;
     };
     assert.deepEqual(bridge.getAppBranding(), {
       baseName: "Agent Nanoni",
@@ -70,6 +73,7 @@ describe("Nanoni renderer init script", () => {
       displayName: "Agent Nanoni",
     });
     assert.equal(bridge.getSystemLocale(), "fr-FR");
+    assert.isTrue(bridge.getWindowFullscreenState());
     assert.deepEqual(bridge.getLocalEnvironmentBootstraps(), [
       {
         id: "primary",
@@ -84,16 +88,16 @@ describe("Nanoni renderer init script", () => {
     const { callbacks, invocations, window } = makeRenderer();
     runInitScript(window);
     const bridge = window.desktopBridge as {
-      invoke: (channel: string, payload: unknown) => Promise<unknown>;
-      on: (channel: string, listener: (payload: unknown) => void) => () => void;
+      getClientSettings: () => Promise<unknown>;
+      onMenuAction: (listener: (action: string) => void) => () => void;
     };
     const received: unknown[] = [];
-    const remove = bridge.on("desktop:test", (payload) => received.push(payload));
+    const remove = bridge.onMenuAction((payload) => received.push(payload));
 
-    const result = await bridge.invoke("desktop:echo", { answer: 42 });
+    const result = await bridge.getClientSettings();
     assert.deepEqual(result, {
       command: "host_invoke",
-      args: { channel: "desktop:echo", payload: { answer: 42 } },
+      args: { channel: NANONI_BRIDGE_CHANNELS.getClientSettings, payload: null },
     });
     assert.equal(invocations.length, 2);
     assert.equal(invocations[0]?.command, "desktop_events");
@@ -103,12 +107,21 @@ describe("Nanoni renderer init script", () => {
     assert.equal(eventArgs.channel.toJSON(), "__CHANNEL__:1");
     const callback = callbacks.get(1);
     assert.isFunction(callback);
-    callback?.({ index: 1, message: { channel: "desktop:test", payload: "second" } });
-    callback?.({ index: 0, message: { channel: "desktop:test", payload: "first" } });
+    callback?.({
+      index: 1,
+      message: { channel: NANONI_PUSH_CHANNELS.onMenuAction, payload: "second" },
+    });
+    callback?.({
+      index: 0,
+      message: { channel: NANONI_PUSH_CHANNELS.onMenuAction, payload: "first" },
+    });
     assert.deepEqual(received, ["first", "second"]);
 
     remove();
-    callback?.({ index: 2, message: { channel: "desktop:test", payload: "ignored" } });
+    callback?.({
+      index: 2,
+      message: { channel: NANONI_PUSH_CHANNELS.onMenuAction, payload: "ignored" },
+    });
     assert.deepEqual(received, ["first", "second"]);
   });
 
@@ -120,13 +133,95 @@ describe("Nanoni renderer init script", () => {
     internals.invoke = () => Promise.reject(new Error("denied"));
     runInitScript(window);
     const bridge = window.desktopBridge as {
-      invoke: (channel: string, payload: unknown) => Promise<unknown>;
+      openExternal: (url: string) => Promise<unknown>;
     };
 
-    return bridge.invoke("desktop:secret", null).then(
+    return bridge.openExternal("https://example.com").then(
       () => assert.fail("expected invoke to reject"),
       (error: unknown) =>
-        assert.equal(String(error), "Error: Error invoking remote method 'desktop:secret': denied"),
+        assert.equal(
+          String(error),
+          `Error: Error invoking remote method '${NANONI_BRIDGE_CHANNELS.openExternal}': denied`,
+        ),
+    );
+  });
+
+  it("matches the Electron preload member set while omitting preview", () => {
+    const { window } = makeRenderer();
+    runInitScript(window);
+    const keys = Object.keys(window.desktopBridge as object).sort();
+    assert.deepEqual(
+      keys,
+      [
+        "bootstrapSshBearerSession",
+        "checkForUpdate",
+        "clearConnectionCatalog",
+        "disconnectSshEnvironment",
+        "discoverSshHosts",
+        "downloadUpdate",
+        "ensureSshEnvironment",
+        "fetchSshEnvironmentDescriptor",
+        "fetchSshSessionState",
+        "getAdvertisedEndpoints",
+        "getAppBranding",
+        "getClientSettings",
+        "getConnectionCatalog",
+        "getLocalEnvironmentBearerToken",
+        "getLocalEnvironmentBootstraps",
+        "getServerExposureState",
+        "getSystemLocale",
+        "getUpdateState",
+        "getWindowFullscreenState",
+        "getWslState",
+        "installUpdate",
+        "issueSshWebSocketTicket",
+        "onMenuAction",
+        "onQuitShortcut",
+        "onSshPasswordPrompt",
+        "onUpdateState",
+        "onWindowFullscreenStateChange",
+        "openExternal",
+        "pickFolder",
+        "pickThemeFiles",
+        "probeRemoteEditors",
+        "resolveSshPasswordPrompt",
+        "setClientSettings",
+        "setConnectionCatalog",
+        "setServerExposureMode",
+        "setTailscaleServeEnabled",
+        "setTheme",
+        "setUpdateChannel",
+        "setWslBackendEnabled",
+        "setWslDistro",
+        "setWslOnly",
+        "showContextMenu",
+      ].sort(),
+    );
+    assert.isFalse("preview" in (window.desktopBridge as object));
+  });
+
+  it("rethrows the Electron cancellation message for SSH prompts", async () => {
+    const { window } = makeRenderer();
+    const internals = window.__TAURI_INTERNALS__ as {
+      invoke: (command: string, args: unknown) => Promise<unknown>;
+    };
+    internals.invoke = (_command, args) => {
+      const request = args as { readonly channel?: string };
+      if (request.channel === NANONI_BRIDGE_CHANNELS.ensureSshEnvironment) {
+        return Promise.resolve({
+          type: "ssh-password-prompt-cancelled",
+          message: "No password entered.",
+        });
+      }
+      return Promise.resolve(undefined);
+    };
+    runInitScript(window);
+    const bridge = window.desktopBridge as {
+      ensureSshEnvironment: (target: unknown) => Promise<unknown>;
+    };
+    await bridge.ensureSshEnvironment({ host: "example.com" }).then(
+      () => assert.fail("expected cancellation to reject"),
+      (error: unknown) => assert.equal(String(error), "Error: No password entered."),
     );
   });
 });

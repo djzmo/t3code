@@ -16,6 +16,8 @@ export interface NanoniRendererSyncSnapshot {
   readonly appBranding: DesktopAppBranding | null;
   readonly systemLocale: string | null;
   readonly localEnvironmentBootstraps: readonly DesktopEnvironmentBootstrap[];
+  /** Cached because the upstream preload reads this synchronously at boot. */
+  readonly windowFullscreenState?: boolean;
 }
 
 export interface NanoniRendererInitScriptOptions {
