@@ -448,32 +448,22 @@ const spawnCommand = (
     });
   });
 
-const commandForPlatform = (name: string): string =>
-  process.platform === "win32" ? `${name}.cmd` : name;
-
 const createCliHooks = (rootDir: string, binaryPath: string | undefined) => {
+  const vpCli = NodePath.join(rootDir, "node_modules/vite-plus/dist/bin.js");
+  const tauriCli = NodePath.join(rootDir, "apps/desktop/node_modules/@tauri-apps/cli/tauri.js");
   const prepare: TauriArtifactPrepareHook = async (context) => {
     const options = { cwd: rootDir, environment: context.environment };
-    await spawnCommand(commandForPlatform("vp"), ["run", "--filter", "t3", "build"], options);
+    await spawnCommand(process.execPath, [vpCli, "run", "--filter", "t3", "build"], options);
     await spawnCommand(
-      commandForPlatform("vp"),
-      ["run", "--filter", "@t3tools/desktop", "build:tauri-host"],
+      process.execPath,
+      [vpCli, "run", "--filter", "@t3tools/desktop", "build:tauri-host"],
       options,
     );
   };
   const build: TauriArtifactHook = async (context) => {
     await spawnCommand(
-      commandForPlatform("pnpm"),
-      [
-        "--filter",
-        "@t3tools/desktop",
-        "exec",
-        "tauri",
-        "build",
-        "--debug",
-        "--config",
-        context.configOverlayPath,
-      ],
+      process.execPath,
+      [tauriCli, "build", "--debug", "--config", context.configOverlayPath],
       { cwd: rootDir, environment: context.environment },
     );
   };
