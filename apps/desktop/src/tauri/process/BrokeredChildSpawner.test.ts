@@ -1,0 +1,154 @@
+import { assert, describe, it } from "@effect/vitest";
+import * as ChildProcess from "effect/unstable/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import * as Effect from "effect/Effect";
+import * as PlatformError from "effect/PlatformError";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
+
+import { makeBrokeredChildSpawner } from "./BrokeredChildSpawner.ts";
+import type { ProcessSpawnParams, RpcProcessBroker } from "./RpcProcessBroker.ts";
+
+const makeHandle = (): ChildProcessSpawner.ChildProcessHandle =>
+  ChildProcessSpawner.makeHandle({
+    pid: ChildProcessSpawner.ProcessId(42),
+    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+    isRunning: Effect.succeed(false),
+    kill: () => Effect.void,
+    stdin: Sink.forEach(() => Effect.void),
+    stdout: Stream.make(new TextEncoder().encode("hello\n")),
+    stderr: Stream.empty,
+    all: Stream.make(new TextEncoder().encode("hello\n")),
+    getInputFd: () => Sink.forEach(() => Effect.void),
+    getOutputFd: () => Stream.empty,
+    unref: Effect.succeed(Effect.void),
+  });
+
+const command = (options: ChildProcess.CommandOptions = {}): ChildProcess.StandardCommand =>
+  ChildProcess.make("node", ["script.js"], options);
+
+describe("BrokeredChildSpawner", () => {
+  it.effect("maps transport-safe standard options and derived helpers", () =>
+    Effect.gen(function* () {
+      let received: ProcessSpawnParams | undefined;
+      const broker: RpcProcessBroker = {
+        spawn: (params: ProcessSpawnParams) => {
+          received = params;
+          return Effect.succeed({
+            _tag: "registered",
+            processId: "process-1",
+            pid: ChildProcessSpawner.ProcessId(42),
+            registrationId: "registration-1",
+            handle: makeHandle(),
+          } as const);
+        },
+        close: () => undefined,
+        activeProcessCount: () => 1,
+      };
+      const spawner = makeBrokeredChildSpawner({
+        broker,
+        kind: "ssh",
+        makeAttemptId: () => "attempt-1",
+      });
+
+      const text = yield* spawner.string(
+        command({
+          cwd: "C:\\work",
+          env: { KEEP: "yes", DROP: undefined },
+          extendEnv: true,
+          stdin: "pipe",
+          stdout: "ignore",
+          stderr: { stream: "pipe" },
+          additionalFds: {
+            fd5: { type: "output" },
+            fd3: { type: "input" },
+          },
+        }),
+      );
+      assert.equal(text, "hello\n");
+      assert.deepEqual(received, {
+        attemptId: "attempt-1",
+        kind: "ssh",
+        command: "node",
+        args: ["script.js"],
+        cwd: "C:\\work",
+        env: { KEEP: "yes" },
+        extendEnv: true,
+        stdin: "pipe",
+        stdout: "null",
+        stderr: "pipe",
+        additionalFds: [
+          { fd: 3, direction: "input" },
+          { fd: 5, direction: "output" },
+        ],
+      });
+    }),
+  );
+
+  it.effect("rejects piped commands and unsafe native modes", () =>
+    Effect.gen(function* () {
+      const broker: RpcProcessBroker = {
+        spawn: () => Effect.die("spawn should not be called"),
+        close: () => undefined,
+        activeProcessCount: () => 0,
+      };
+      const spawner = makeBrokeredChildSpawner({ broker });
+      const unsafe = [
+        command({ detached: true }),
+        command({ shell: true }),
+        command({ stdin: "inherit" }),
+        command({ stdout: "overlapped" }),
+        command({ additionalFds: { fd3: { type: "input", stream: Stream.empty } } }),
+      ];
+      for (const value of unsafe) {
+        const exit = yield* spawner.spawn(value).pipe(Effect.exit);
+        assert.isTrue(exit._tag === "Failure");
+      }
+      const piped = ChildProcess.pipeTo(command(), command());
+      const exit = yield* spawner.spawn(piped).pipe(Effect.exit);
+      assert.isTrue(exit._tag === "Failure");
+    }),
+  );
+
+  it.effect("turns fast exits into terminal handles without a registration", () =>
+    Effect.gen(function* () {
+      const broker: RpcProcessBroker = {
+        spawn: () =>
+          Effect.succeed({
+            _tag: "fast-exit",
+            processId: "fast",
+            pid: ChildProcessSpawner.ProcessId(43),
+            registrationId: null,
+            terminal: Effect.succeed({ type: "process.exit", code: 7 } as const),
+          } as const),
+        close: () => undefined,
+        activeProcessCount: () => 0,
+      };
+      const spawner = makeBrokeredChildSpawner({ broker });
+      const handle = yield* Effect.scoped(spawner.spawn(command()));
+      assert.equal(yield* handle.exitCode, ChildProcessSpawner.ExitCode(7));
+      assert.equal((yield* Stream.runCollect(handle.stdout)).length, 0);
+      assert.isFalse(yield* handle.isRunning);
+    }),
+  );
+
+  it.effect("supports derived lines and exitCode", () =>
+    Effect.gen(function* () {
+      const broker: RpcProcessBroker = {
+        spawn: () =>
+          Effect.succeed({
+            _tag: "registered",
+            processId: "process-1",
+            pid: ChildProcessSpawner.ProcessId(42),
+            registrationId: "registration-1",
+            handle: makeHandle(),
+          } as const),
+        close: () => undefined,
+        activeProcessCount: () => 1,
+      };
+      const spawner = makeBrokeredChildSpawner({ broker });
+      assert.deepEqual(yield* spawner.lines(command()), ["hello"]);
+      assert.equal(yield* spawner.exitCode(command()), ChildProcessSpawner.ExitCode(0));
+    }),
+  );
+});
