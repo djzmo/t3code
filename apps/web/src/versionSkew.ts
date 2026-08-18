@@ -1,7 +1,7 @@
 import type { EnvironmentId, ServerConfig, ServerSelfUpdateCapability } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
-import { APP_VERSION } from "./branding";
+import { COMPATIBLE_SERVER_VERSION } from "./branding";
 import { getLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
 
 export interface VersionMismatch {
@@ -26,7 +26,7 @@ function normalizeVersion(version: string | null | undefined): string | null {
 export function resolveVersionMismatch(
   serverVersion: string | null | undefined,
 ): VersionMismatch | null {
-  const normalizedClientVersion = normalizeVersion(APP_VERSION);
+  const normalizedClientVersion = normalizeVersion(COMPATIBLE_SERVER_VERSION);
   const normalizedServerVersion = normalizeVersion(serverVersion);
   if (
     !normalizedClientVersion ||

@@ -11,7 +11,7 @@ import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import { resolvePrimaryEnvironmentHttpUrl } from "../environments/primary";
 import { primaryEnvironmentHttpLayer } from "../environments/primary/httpLayer";
 import { isElectron } from "../env";
-import { APP_VERSION } from "~/branding";
+import { PRODUCT_VERSION } from "~/branding";
 
 const DEFAULT_EXPORT_INTERVAL_MS = 1_000;
 const CLIENT_TRACING_RESOURCE = {
@@ -19,7 +19,7 @@ const CLIENT_TRACING_RESOURCE = {
   attributes: {
     "service.runtime": "t3-web",
     "service.mode": isElectron ? "electron" : "browser",
-    "service.version": APP_VERSION,
+    "service.version": PRODUCT_VERSION,
   },
 } as const;
 

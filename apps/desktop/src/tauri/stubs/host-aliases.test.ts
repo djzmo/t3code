@@ -23,6 +23,7 @@ const tauriConfig = await import(
 type TauriHostAlias = { readonly find: RegExp; readonly replacement: string };
 const TAURI_HOST_ALIASES = tauriConfig.TAURI_HOST_ALIASES as readonly TauriHostAlias[];
 const TAURI_HOST_BUILD = tauriConfig.TAURI_HOST_BUILD;
+const resolveTauriHostVersionDefines = tauriConfig.resolveTauriHostVersionDefines;
 
 const walkTypeScriptFiles = (directory: string): string[] =>
   readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -35,6 +36,22 @@ const findAlias = (specifier: string) =>
   TAURI_HOST_ALIASES.find(({ find }) => find instanceof RegExp && find.test(specifier));
 
 describe("Tauri host module aliases", () => {
+  it("injects all three version values or explicit development fallbacks", () => {
+    assert.deepEqual(
+      resolveTauriHostVersionDefines({
+        NANONI_PRODUCT_VERSION: "1.2.3",
+        NANONI_COMPAT_SERVER_VERSION: "0.0.34-nightly.20260817.1116",
+        NANONI_UPSTREAM_TAG: "v0.0.34-nightly.20260817.1116",
+      }),
+      {
+        __NANONI_PRODUCT_VERSION__: '\"1.2.3\"',
+        __NANONI_COMPAT_SERVER_VERSION__: '\"0.0.34-nightly.20260817.1116\"',
+        __NANONI_UPSTREAM_TAG__: '\"v0.0.34-nightly.20260817.1116\"',
+      },
+    );
+    assert.equal(resolveTauriHostVersionDefines({}).__NANONI_PRODUCT_VERSION__, "undefined");
+  });
+
   it("declares the Node SSR host entry and deterministic CJS output", () => {
     assert.deepEqual(TAURI_HOST_BUILD, {
       entry: "src/tauri/main.ts",

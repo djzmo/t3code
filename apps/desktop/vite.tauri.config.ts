@@ -27,7 +27,22 @@ export const TAURI_HOST_BUILD = {
   fileName: "host.cjs",
 } as const;
 
+export const resolveTauriHostVersionDefines = (
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+) => {
+  const define = (name: string): string => {
+    const value = environment[name];
+    return value === undefined ? "undefined" : JSON.stringify(value);
+  };
+  return {
+    __NANONI_PRODUCT_VERSION__: define("NANONI_PRODUCT_VERSION"),
+    __NANONI_COMPAT_SERVER_VERSION__: define("NANONI_COMPAT_SERVER_VERSION"),
+    __NANONI_UPSTREAM_TAG__: define("NANONI_UPSTREAM_TAG"),
+  } as const;
+};
+
 export default defineConfig({
+  define: resolveTauriHostVersionDefines(),
   resolve: {
     alias: TAURI_HOST_ALIASES,
   },
