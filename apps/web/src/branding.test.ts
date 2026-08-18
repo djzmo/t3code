@@ -39,6 +39,25 @@ describe("branding", () => {
     expect(branding.APP_DISPLAY_NAME).toBe("T3 Code (Nightly)");
   });
 
+  it("keeps product and compatible server versions separate in a Tauri boot", async () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        __NANONI_BOOT__: {
+          productVersion: "1.0.0-nightly.20260818.42",
+          compatibleServerVersion: "0.0.34-nightly.20260817.1116",
+          upstreamBaseTag: "v0.0.34-nightly.20260817.1116",
+        },
+      },
+    });
+
+    const branding = await import("./branding");
+
+    expect(branding.PRODUCT_VERSION).toBe("1.0.0-nightly.20260818.42");
+    expect(branding.COMPATIBLE_SERVER_VERSION).toBe("0.0.34-nightly.20260817.1116");
+    expect(branding.UPSTREAM_BASE_TAG).toBe("v0.0.34-nightly.20260817.1116");
+  });
+
   it("normalizes hosted app channel metadata", async () => {
     vi.stubEnv("VITE_HOSTED_APP_CHANNEL", "nightly");
 
