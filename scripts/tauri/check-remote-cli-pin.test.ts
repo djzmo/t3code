@@ -1,6 +1,9 @@
 const NodeFS = await import("node:fs");
 const NodeOS = await import("node:os");
 const NodePath = await import("node:path");
+const NodeBuffer = await import("node:buffer");
+const NodeCrypto = await import("node:crypto");
+const NodeZlib = await import("node:zlib");
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildProvenancePolicy,
@@ -136,6 +139,120 @@ const check = (root: string) =>
     attestation: { attestations: [] },
     verifyExecutableSurface: async () => undefined,
   });
+
+const tarEntry = (name: string, content: string): NodeBuffer.Buffer => {
+  const bytes = NodeBuffer.Buffer.from(content);
+  const header = NodeBuffer.Buffer.alloc(512);
+  header.write(name, 0, 100, "utf8");
+  header.write("0000644\0", 100, 8, "ascii");
+  header.write("00000000000\0", 108, 12, "ascii");
+  header.write("00000000000\0", 116, 12, "ascii");
+  header.write(bytes.length.toString(8).padStart(11, "0") + "\0", 124, 12, "ascii");
+  header.write("00000000000\0", 136, 12, "ascii");
+  header[156] = 0x30;
+  header.write("ustar\0", 257, 6, "ascii");
+  header.write("00", 263, 2, "ascii");
+  header.fill(0x20, 148, 156);
+  const checksum = [...header].reduce((sum, byte) => sum + byte, 0);
+  header.write(checksum.toString(8).padStart(6, "0") + "\0 ", 148, 8, "ascii");
+  const padding = NodeBuffer.Buffer.alloc((512 - (bytes.length % 512)) % 512);
+  return NodeBuffer.Buffer.concat([header, bytes, padding]);
+};
+
+const packedFixture = (expectedIntegrity: string) => {
+  const root = fixture();
+  const packageManifest = {
+    name: "t3",
+    version: "0.0.1",
+    bin: { t3: "dist/t3.js" },
+  };
+  write(root, "apps/server/package.json", JSON.stringify(packageManifest, null, 2));
+  write(root, "apps/server/dist/t3.js", "#!/usr/bin/env node\n");
+  write(
+    root,
+    "apps/desktop/src-tauri/remote-cli.json",
+    JSON.stringify(
+      { upstreamTag: "v0.0.1", packageSpec: "t3@0.0.1", tarballIntegrity: expectedIntegrity },
+      null,
+      2,
+    ),
+  );
+  const tarBytes = NodeBuffer.Buffer.concat([
+    tarEntry("package/package.json", `${JSON.stringify(packageManifest)}\n`),
+    tarEntry("package/dist/t3.js", "#!/usr/bin/env node\n"),
+    NodeBuffer.Buffer.alloc(1024),
+  ]);
+  const compressedBytes = NodeZlib.gzipSync(tarBytes);
+  const archivePath = NodePath.join(root, "t3-0.0.1.tgz");
+  NodeFS.writeFileSync(archivePath, compressedBytes);
+  const delegate = baselineGit(root);
+  const git: GitRunner = async (args) => {
+    if (args[0] === "ls-tree" && args.includes("apps/server")) {
+      return "apps/server/package.json\napps/server/dist/t3.js\n";
+    }
+    return delegate(args);
+  };
+  return { root, archivePath, git };
+};
+
+const npmPackShim = (root: string): string => {
+  const shim = NodePath.join(root, "npm-shim");
+  NodeFS.mkdirSync(shim, { recursive: true });
+  NodeFS.writeFileSync(
+    NodePath.join(shim, "mock-npm.mjs"),
+    [
+      "import fs from 'node:fs';",
+      "import path from 'node:path';",
+      "const args = process.argv.slice(2);",
+      "const index = args.indexOf('--pack-destination');",
+      "if (index < 0 || !args[index + 1]) process.exit(2);",
+      "const destination = args[index + 1];",
+      "const filename = 't3-0.0.1.tgz';",
+      "fs.copyFileSync(process.env.MOCK_NPM_TARBALL, path.join(destination, filename));",
+      "process.stdout.write(JSON.stringify([{ filename, integrity: process.env.MOCK_NPM_INTEGRITY }]));",
+    ].join("\n"),
+  );
+  NodeFS.writeFileSync(
+    NodePath.join(shim, "npm"),
+    `#!/usr/bin/env node\n${NodeFS.readFileSync(NodePath.join(shim, "mock-npm.mjs"), "utf8")}`,
+  );
+  NodeFS.chmodSync(NodePath.join(shim, "npm"), 0o755);
+  NodeFS.writeFileSync(
+    NodePath.join(shim, "npm.cmd"),
+    `@echo off\r\nnode "%~dp0mock-npm.mjs" %*\r\n`,
+  );
+  return shim;
+};
+
+const runWithDefaultSurface = async (
+  root: string,
+  archivePath: string,
+  git: GitRunner,
+  expectedIntegrity: string,
+): Promise<unknown> => {
+  const shim = npmPackShim(root);
+  const previousPath = process.env.PATH;
+  const previousArchive = process.env.MOCK_NPM_TARBALL;
+  const previousIntegrity = process.env.MOCK_NPM_INTEGRITY;
+  process.env.PATH = `${shim}${NodePath.delimiter}${previousPath ?? ""}`;
+  process.env.MOCK_NPM_TARBALL = archivePath;
+  process.env.MOCK_NPM_INTEGRITY = expectedIntegrity;
+  try {
+    return await verifyRemoteCliPin({
+      rootDir: root,
+      git,
+      distIntegrity: expectedIntegrity,
+      attestation: { attestations: [] },
+    });
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    if (previousArchive === undefined) delete process.env.MOCK_NPM_TARBALL;
+    else process.env.MOCK_NPM_TARBALL = previousArchive;
+    if (previousIntegrity === undefined) delete process.env.MOCK_NPM_INTEGRITY;
+    else process.env.MOCK_NPM_INTEGRITY = previousIntegrity;
+  }
+};
 
 afterEach(() => {
   for (const root of temporaryRoots.splice(0))
@@ -635,5 +752,32 @@ describe("remote CLI provenance policy", () => {
     expect(JSON.parse(NodeFS.readFileSync(pinPath, "utf8"))).toMatchObject({
       tarballIntegrity: INTEGRITY,
     });
+  });
+});
+
+describe("remote CLI executable surface", () => {
+  it("checks compressed npm-pack integrity through the default verifier", async () => {
+    const packageManifest = JSON.stringify({
+      name: "t3",
+      version: "0.0.1",
+      bin: { t3: "dist/t3.js" },
+    });
+    const tarBytes = NodeBuffer.Buffer.concat([
+      tarEntry("package/package.json", `${packageManifest}\n`),
+      tarEntry("package/dist/t3.js", "#!/usr/bin/env node\n"),
+      NodeBuffer.Buffer.alloc(1024),
+    ]);
+    const compressedBytes = NodeZlib.gzipSync(tarBytes);
+    const validIntegrity = `sha512-${NodeCrypto.createHash("sha512").update(compressedBytes).digest("base64")}`;
+    const valid = packedFixture(validIntegrity);
+    await expect(
+      runWithDefaultSurface(valid.root, valid.archivePath, valid.git, validIntegrity),
+    ).resolves.toMatchObject({ packageVersion: "0.0.1" });
+
+    const wrongIntegrity = `sha512-${NodeCrypto.createHash("sha512").update("wrong").digest("base64")}`;
+    const wrong = packedFixture(wrongIntegrity);
+    await expect(
+      runWithDefaultSurface(wrong.root, wrong.archivePath, wrong.git, wrongIntegrity),
+    ).rejects.toMatchObject<RemoteCliPinError>({ code: "integrity-mismatch" });
   });
 });

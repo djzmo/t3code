@@ -1169,7 +1169,7 @@ const defaultExecutableSurface = async (input: ExecutableSurfaceInput): Promise<
   const temporary = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "remote-cli-pin-pack-"));
   try {
     const output = NodeChildProcess.execFileSync(
-      "npm",
+      process.platform === "win32" ? "npm.cmd" : "npm",
       [
         "pack",
         `${input.packageName}@${input.packageVersion}`,
@@ -1181,6 +1181,7 @@ const defaultExecutableSurface = async (input: ExecutableSurfaceInput): Promise<
       {
         cwd: input.rootDir,
         encoding: "utf8",
+        shell: process.platform === "win32",
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -1292,8 +1293,10 @@ const defaultExecutableSurface = async (input: ExecutableSurfaceInput): Promise<
         );
       }
     }
-    const tarIntegrity = `sha512-${NodeCrypto.createHash("sha512").update(tarBytes).digest("base64")}`;
-    if (tarIntegrity !== input.expectedIntegrity) {
+    // npm's dist.integrity is the SRI digest of the compressed .tgz bytes,
+    // not the decompressed tar stream used for the executable-surface checks.
+    const compressedIntegrity = `sha512-${NodeCrypto.createHash("sha512").update(compressedBytes).digest("base64")}`;
+    if (compressedIntegrity !== input.expectedIntegrity) {
       throw new RemoteCliPinError(
         "integrity-mismatch",
         "npm pack tarball digest does not match remote-cli.json.",
