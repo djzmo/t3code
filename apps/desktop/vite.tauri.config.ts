@@ -21,8 +21,30 @@ export const TAURI_HOST_ALIASES = [
   { find: /^@clerk\/electron\/preload$/, replacement: stubPath("clerk-electron") },
 ] as const;
 
+export const TAURI_HOST_BUILD = {
+  entry: "src/tauri/main.ts",
+  outDir: "dist-tauri-host",
+  fileName: "host.cjs",
+} as const;
+
 export default defineConfig({
   resolve: {
     alias: TAURI_HOST_ALIASES,
+  },
+  build: {
+    ssr: TAURI_HOST_BUILD.entry,
+    outDir: TAURI_HOST_BUILD.outDir,
+    emptyOutDir: true,
+    sourcemap: true,
+    rollupOptions: {
+      output: {
+        format: "cjs",
+        entryFileNames: TAURI_HOST_BUILD.fileName,
+        chunkFileNames: "chunks/[name]-[hash].cjs",
+      },
+    },
+  },
+  ssr: {
+    target: "node",
   },
 });

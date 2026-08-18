@@ -48,8 +48,17 @@ export const ipcRenderer = throwingMember("ipcRenderer");
 export const Menu = throwingMember("Menu");
 export const nativeImage = throwingMember("nativeImage");
 export const nativeTheme = throwingMember("nativeTheme");
+export const net = Object.freeze({
+  fetch: (..._args: readonly unknown[]): never => unavailable("net.fetch"),
+});
 export const powerMonitor = throwingMember("powerMonitor");
 export const protocol = throwingMember("protocol");
+export const safeStorage = Object.freeze({
+  isEncryptionAvailable: (): never => unavailable("safeStorage.isEncryptionAvailable"),
+  encryptString: (..._args: readonly unknown[]): never => unavailable("safeStorage.encryptString"),
+  decryptString: (..._args: readonly unknown[]): never => unavailable("safeStorage.decryptString"),
+  getSelectedStorageBackend: (): never => unavailable("safeStorage.getSelectedStorageBackend"),
+});
 export const session = throwingMember("session");
 export const shell = throwingMember("shell");
 export const webContents = throwingMember("webContents");

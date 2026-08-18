@@ -7,6 +7,7 @@
   "scripts": {
     "ensure:electron": "node scripts/ensure-electron-runtime.mjs",
     "start": "node scripts/start-electron.mjs",
+    "build:tauri-host": "vp build --config vite.tauri.config.ts --ssr src/tauri/main.ts --outDir dist-tauri-host --emptyOutDir && node scripts/check-tauri-host-bundle.mjs",
     "typecheck": "tsgo --noEmit",
     "test": "vp test run --passWithNoTests",
     "smoke-test": "node scripts/smoke-test.mjs"

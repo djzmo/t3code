@@ -26,6 +26,7 @@ squashfs-root/
 .vercel
 .gstack/
 dist-electron/
+apps/desktop/dist-tauri-host/
 .electron-runtime/
 .showcase/
 apps/mobile/.showcase/

@@ -22,6 +22,7 @@ const tauriConfig = await import(
 );
 type TauriHostAlias = { readonly find: RegExp; readonly replacement: string };
 const TAURI_HOST_ALIASES = tauriConfig.TAURI_HOST_ALIASES as readonly TauriHostAlias[];
+const TAURI_HOST_BUILD = tauriConfig.TAURI_HOST_BUILD;
 
 const walkTypeScriptFiles = (directory: string): string[] =>
   readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -34,6 +35,47 @@ const findAlias = (specifier: string) =>
   TAURI_HOST_ALIASES.find(({ find }) => find instanceof RegExp && find.test(specifier));
 
 describe("Tauri host module aliases", () => {
+  it("declares the Node SSR host entry and deterministic CJS output", () => {
+    assert.deepEqual(TAURI_HOST_BUILD, {
+      entry: "src/tauri/main.ts",
+      outDir: "dist-tauri-host",
+      fileName: "host.cjs",
+    });
+
+    const build = (
+      tauriConfig.default as {
+        build?: {
+          ssr?: string;
+          outDir?: string;
+          emptyOutDir?: boolean;
+          sourcemap?: boolean;
+          rollupOptions?: {
+            output?: {
+              format?: string;
+              entryFileNames?: string;
+              chunkFileNames?: string;
+            };
+          };
+        };
+        ssr?: { target?: string };
+      }
+    ).build;
+    assert.deepEqual(build, {
+      ssr: "src/tauri/main.ts",
+      outDir: "dist-tauri-host",
+      emptyOutDir: true,
+      sourcemap: true,
+      rollupOptions: {
+        output: {
+          format: "cjs",
+          entryFileNames: "host.cjs",
+          chunkFileNames: "chunks/[name]-[hash].cjs",
+        },
+      },
+    });
+    assert.deepEqual((tauriConfig.default as { ssr?: unknown }).ssr, { target: "node" });
+  });
+
   it("maps every forbidden runtime package to an existing exact stub", () => {
     const configuredAliases = (tauriConfig.default as { resolve?: { alias?: unknown } }).resolve
       ?.alias;
@@ -86,5 +128,25 @@ describe("Tauri host module aliases", () => {
       { bounds: { x: 0, y: 0, width: 1920, height: 1080 } },
     ]);
     assert.throws(() => electronStub.app.name, /unavailable in the Tauri host/);
+    assert.throws(
+      () => electronStub.net.fetch("https://example.test"),
+      /unavailable in the Tauri host/,
+    );
+    assert.throws(
+      () => electronStub.safeStorage.isEncryptionAvailable(),
+      /unavailable in the Tauri host/,
+    );
+    assert.throws(
+      () => electronStub.safeStorage.encryptString("secret"),
+      /unavailable in the Tauri host/,
+    );
+    assert.throws(
+      () => electronStub.safeStorage.decryptString(Buffer.from("secret")),
+      /unavailable in the Tauri host/,
+    );
+    assert.throws(
+      () => electronStub.safeStorage.getSelectedStorageBackend(),
+      /unavailable in the Tauri host/,
+    );
   });
 });
