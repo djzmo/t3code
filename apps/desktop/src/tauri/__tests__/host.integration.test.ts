@@ -1,12 +1,14 @@
-const { existsSync, mkdtempSync, rmSync } = await import("node:fs");
+const { existsSync, mkdtempSync, readFileSync, rmSync } = await import("node:fs");
 const NodeOS = await import("node:os");
 const NodePath = await import("node:path");
 
 import { assert, it } from "@effect/vitest";
+import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
+import { HttpClient } from "effect/unstable/http";
 
 import * as DesktopApp from "../../app/DesktopApp.ts";
 import * as IpcChannels from "../../ipc/channels.ts";
@@ -17,6 +19,14 @@ import { make as makeFakeShell } from "../testing/FakeShell.ts";
 
 const repositoryRoot = NodePath.resolve(process.cwd());
 const serverEntryPath = NodePath.join(repositoryRoot, "apps/server/dist/bin.mjs");
+const persistedRuntimeStateSchema = Schema.Struct({
+  pid: Schema.Int,
+  port: Schema.Int,
+  origin: Schema.String,
+});
+const decodePersistedRuntimeState = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(persistedRuntimeStateSchema),
+);
 
 class HostIntegrationReadinessError extends Schema.TaggedErrorClass<HostIntegrationReadinessError>()(
   "HostIntegrationReadinessError",
@@ -102,9 +112,13 @@ it.live.skipIf(!existsSync(serverEntryPath))(
         },
       });
       const ipcMain = TauriIpcMain.make();
-      const mainWindowCreated = yield* Deferred.make<TauriWindow.TauriWindowEventParams>();
+      const backendReadyRevealed = yield* Deferred.make<TauriWindow.TauriWindowEventParams>();
       const removeWindowListener = fake.window.on?.("window.event", (event) => {
-        if (event.type === "created") completeDeferred(mainWindowCreated, event);
+        // TauriDesktopWindow.handleBackendReady is called only after
+        // DesktopBackendManager's authoritative HTTP readiness probe.  The
+        // resulting reveal emits focus after window creation; waiting for it
+        // keeps this integration gate from passing on creation alone.
+        if (event.type === "focus") completeDeferred(backendReadyRevealed, event);
       });
       yield* Effect.addFinalizer(() => Effect.sync(() => removeWindowListener?.()));
 
@@ -134,7 +148,7 @@ it.live.skipIf(!existsSync(serverEntryPath))(
       );
       const programFiber = yield* Effect.forkScoped(program);
       yield* Effect.raceFirst(
-        Deferred.await(mainWindowCreated),
+        Deferred.await(backendReadyRevealed),
         Deferred.await(programExited).pipe(
           Effect.flatMap(() =>
             Effect.fail(
@@ -145,6 +159,49 @@ it.live.skipIf(!existsSync(serverEntryPath))(
           ),
         ),
       );
+
+      const runtimeStatePath = NodePath.join(home, "userdata", "server-runtime.json");
+      assert.isTrue(existsSync(runtimeStatePath));
+      const runtimeState = yield* decodePersistedRuntimeState(
+        readFileSync(runtimeStatePath, "utf8"),
+      );
+      const origin = new URL(runtimeState.origin);
+      assert.equal(origin.protocol, "http:");
+      assert.include(["127.0.0.1", "localhost"], origin.hostname);
+
+      // This is the server's public, token-free readiness/bootstrap receipt,
+      // using the persisted origin written by that exact child process.
+      const readinessResponse = yield* HttpClient.get(
+        new URL("/.well-known/t3/environment", origin),
+      ).pipe(
+        Effect.mapError(
+          (cause) =>
+            new HostIntegrationReadinessError({
+              detail: `well-known readiness request failed: ${String(cause)}`,
+            }),
+        ),
+        Effect.provide(NodeHttpClient.layerUndici),
+      );
+      yield* readinessResponse.text;
+      assert.equal(readinessResponse.status, 200);
+      const serverRegistration = fake.registrations.find(
+        ({ pid }) => Number(pid) === runtimeState.pid,
+      );
+      assert.isDefined(serverRegistration);
+      assert.isTrue(fake.activeRegistrations.some(({ pid }) => Number(pid) === runtimeState.pid));
+
+      const createRequestIndex = fake.requests.findIndex(
+        ({ method }) => method === "window.create",
+      );
+      const showNotificationIndex = fake.notifications.findIndex(
+        ({ method }) => method === "window.show",
+      );
+      const focusNotificationIndex = fake.notifications.findIndex(
+        ({ method }) => method === "window.focus",
+      );
+      assert.isAtLeast(createRequestIndex, 0);
+      assert.isAtLeast(showNotificationIndex, 0);
+      assert.isTrue(focusNotificationIndex > showNotificationIndex);
 
       const branding = ipcMain.invokeSync(IpcChannels.GET_APP_BRANDING_CHANNEL);
       const locale = ipcMain.invokeSync(IpcChannels.GET_SYSTEM_LOCALE_CHANNEL);

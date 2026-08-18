@@ -1,6 +1,8 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as Effect from "effect/Effect";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import * as Stream from "effect/Stream";
 
 import * as TauriApp from "./electron/TauriApp.ts";
 import * as TauriDialog from "./electron/TauriDialog.ts";
@@ -68,5 +70,40 @@ describe("Tauri host composition", () => {
       assert.isTrue(fake.requests.some(({ method }) => method === "shell.openExternal"));
       assert.isTrue(fake.requests.some(({ method }) => method === "dialog.error"));
     }).pipe(Effect.provide(runtimeLayer)),
+  );
+
+  it.effect("routes every derived child helper through the managed composition boundary", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const beforeRegistrations = fake.registrations.length;
+        const command = ChildProcess.make(
+          process.execPath,
+          ["-e", "process.stdout.write('one\\ntwo\\n')"],
+          {
+            cwd: process.cwd(),
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+          },
+        );
+
+        assert.equal(yield* spawner.string(command), "one\ntwo\n");
+        assert.deepEqual(yield* spawner.lines(command), ["one", "two"]);
+        assert.equal(yield* spawner.exitCode(command), ChildProcessSpawner.ExitCode(0));
+        assert.deepEqual(yield* spawner.streamLines(command).pipe(Stream.runCollect), [
+          "one",
+          "two",
+        ]);
+
+        const registrations = fake.registrations.slice(beforeRegistrations);
+        // ChildProcessSpawner.make derives string/lines/exitCode/streamLines
+        // from spawn.  Four receipts prove the runtime layer did not expose
+        // the raw Node delegate to any of those helpers.
+        assert.lengthOf(registrations, 4);
+        assert.isTrue(registrations.every(({ pid }) => Number(pid) > 0));
+        assert.isEmpty(fake.activeRegistrations);
+      }),
+    ).pipe(Effect.provide(runtimeLayer)),
   );
 });
