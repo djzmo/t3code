@@ -355,8 +355,64 @@ describe("remote CLI pin closure", () => {
     write(root, "apps/server/vite.config.ts", "import '../../scripts/lib';\n");
     write(root, "apps/server/scripts/cli.ts", "export const cli = true;\n");
     write(root, "scripts/lib/index.ts", "export const indexed = true;\n");
-    const git = baselineGit(root);
+    const delegate = baselineGit(root);
+    const directoryShows: string[] = [];
+    const git: GitRunner = async (args) => {
+      if (args[0] === "show" && args[1]?.endsWith(":scripts/lib")) {
+        directoryShows.push(args[1]);
+        throw new Error("EISDIR");
+      }
+      return delegate(args);
+    };
     write(root, "scripts/lib/index.ts", "export const indexed = false;\n");
+
+    await expect(
+      verifyRemoteCliPin({
+        rootDir: root,
+        git,
+        distIntegrity: INTEGRITY,
+        attestation: { attestations: [] },
+        verifyExecutableSurface: async () => undefined,
+      }),
+    ).rejects.toMatchObject<RemoteCliPinError>({ code: "server-closure-diff" });
+    expect(directoryShows).toEqual([]);
+  });
+
+  it.each(["cts", "cjs"])(
+    "tracks extensionless directory imports resolved through index.%s",
+    async (extension) => {
+      const root = fixture();
+      write(root, "apps/server/vite.config.ts", "import '../../scripts/lib';\n");
+      write(root, "apps/server/scripts/cli.ts", "export const cli = true;\n");
+      const indexedPath = `scripts/lib/index.${extension}`;
+      write(root, indexedPath, "export const indexed = true;\n");
+      const git = baselineGit(root);
+      write(root, indexedPath, "export const indexed = false;\n");
+
+      await expect(
+        verifyRemoteCliPin({
+          rootDir: root,
+          git,
+          distIntegrity: INTEGRITY,
+          attestation: { attestations: [] },
+          verifyExecutableSurface: async () => undefined,
+        }),
+      ).rejects.toMatchObject<RemoteCliPinError>({ code: "server-closure-diff" });
+    },
+  );
+
+  it.each([
+    [
+      "dynamic import",
+      "void import(`../../scripts/lib/build.ts`);\n",
+      "apps/server/vite.config.ts",
+    ],
+    ["require", "void require(`../../../scripts/lib/build.ts`);\n", "apps/server/scripts/cli.ts"],
+  ])("tracks literal-backtick %s dependencies", async (_name, source, importer) => {
+    const root = fixture();
+    write(root, importer, source);
+    const git = baselineGit(root);
+    write(root, "scripts/lib/build.ts", "export const build = false;\n");
 
     await expect(
       verifyRemoteCliPin({
@@ -369,14 +425,48 @@ describe("remote CLI pin closure", () => {
     ).rejects.toMatchObject<RemoteCliPinError>({ code: "server-closure-diff" });
   });
 
+  it.each([
+    ["interpolated", "void import(`../../scripts/lib/${name}.ts`);\n"],
+    ["multiline interpolated", "void import(`../../scripts/lib/${\nname}.ts`);\n"],
+    ["escaped", "void import(`../../scripts/lib/build\\\\x2Ets`);\n"],
+  ])("fails closed for %s template build imports", async (_name, source) => {
+    const root = fixture();
+    write(root, "apps/server/vite.config.ts", source);
+    await expect(check(root)).rejects.toMatchObject<RemoteCliPinError>({
+      code: "server-closure-diff",
+    });
+  });
+
   it("tracks reachable build imports separated by JavaScript comments", async () => {
     const root = fixture();
     write(
       root,
       "apps/server/vite.config.ts",
-      "import/* graph comments are valid here */ '../../scripts/lib/build.ts';\n",
+      "import/* graph comments are valid here */{build}from'../../scripts/lib/build.ts';\n",
     );
     write(root, "apps/server/scripts/cli.ts", "export const cli = true;\n");
+    const git = baselineGit(root);
+    write(root, "scripts/lib/build.ts", "export const build = false;\n");
+
+    await expect(
+      verifyRemoteCliPin({
+        rootDir: root,
+        git,
+        distIntegrity: INTEGRITY,
+        attestation: { attestations: [] },
+        verifyExecutableSurface: async () => undefined,
+      }),
+    ).rejects.toMatchObject<RemoteCliPinError>({ code: "server-closure-diff" });
+  });
+
+  it("tracks reachable build requires separated by JavaScript comments", async () => {
+    const root = fixture();
+    write(root, "apps/server/vite.config.ts", "export default {};\n");
+    write(
+      root,
+      "apps/server/scripts/cli.ts",
+      "const { build } = require/* graph comments are valid here */('../../../scripts/lib/build.ts');\n",
+    );
     const git = baselineGit(root);
     write(root, "scripts/lib/build.ts", "export const build = false;\n");
 
@@ -466,6 +556,13 @@ describe("remote CLI pin closure", () => {
     const root = fixture();
     const delegate = baselineGit(root);
     const git: GitRunner = async (args) => {
+      if (
+        args[0] === "cat-file" &&
+        args[1] === "-t" &&
+        args[2] === "v0.0.1:apps/server/deleted.ts"
+      ) {
+        return "blob\n";
+      }
       if (args[0] === "ls-tree" && args.includes("apps/server")) {
         return "apps/server/deleted.ts\napps/server/package.json\n";
       }

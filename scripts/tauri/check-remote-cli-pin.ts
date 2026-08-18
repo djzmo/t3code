@@ -437,7 +437,59 @@ const collectWorkspaceClosure = (
 };
 
 const importSpecifierPattern =
-  /(?:import\s+(?:[\s\S]*?\s+from\s+)?|export\s+[\s\S]*?\s+from\s+|import\s*\(|require\s*\()(['"])([^'"\n]+)\1/g;
+  /(?:\bimport\b(?:[\s\S]*?\bfrom\b)?\s*|\bexport\b[\s\S]*?\bfrom\b\s*|\b(?:import|require)\s*\()\s*(?:(['"])([^'"\n]+)\1|(`)([^`]*)`)/g;
+
+/**
+ * Return a specifier only for a string literal that this checker can resolve.
+ * Dynamic template specifiers fail closed: silently skipping one would let a
+ * reachable local build helper escape the pinned source closure.
+ */
+const staticImportSpecifier = (match: RegExpMatchArray, importer: string): string | undefined => {
+  const quoted = match[2];
+  if (quoted !== undefined) return quoted;
+  const template = match[4];
+  if (template === undefined) return undefined;
+  const hasInterpolation = template.includes("${");
+  const hasEscape = template.includes("\\");
+  // A relative template can participate in the local build graph even when
+  // its final value is not statically knowable.  Skipping it would make the
+  // closure check unsound, so fail closed instead of treating a prefix as a
+  // complete path.  Templates that are plainly package/bare-specifier based
+  // remain outside this local graph and can be ignored.
+  if ((hasInterpolation || hasEscape) && (template.startsWith(".") || template.startsWith("\\"))) {
+    throw new RemoteCliPinError(
+      "server-closure-diff",
+      `Unable to statically resolve a local dynamic import in '${importer}'.`,
+    );
+  }
+  let escaped = false;
+  for (let index = 0; index < template.length; index += 1) {
+    const character = template[index] ?? "";
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (character === "$" && template[index + 1] === "{") {
+      throw new RemoteCliPinError(
+        "server-closure-diff",
+        "Build-script imports must use a statically resolvable string literal.",
+      );
+    }
+  }
+  // Escaped characters require JavaScript's cooked-template semantics. Keep
+  // this conservative until the graph walker has a full module parser.
+  if (escaped || template.includes("\\")) {
+    throw new RemoteCliPinError(
+      "server-closure-diff",
+      "Build-script imports must not use escaped template specifiers.",
+    );
+  }
+  return template;
+};
 
 const stripJavaScriptComments = (source: string): string => {
   let output = "";
@@ -504,9 +556,15 @@ const resolveLocalImport = (
     ...[".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs"].map(
       (extension) => `${base}${extension}`,
     ),
-    ...["index.ts", "index.tsx", "index.mts", "index.js", "index.mjs"].map((entry) =>
-      NodePath.join(base, entry),
-    ),
+    ...[
+      "index.ts",
+      "index.tsx",
+      "index.mts",
+      "index.cts",
+      "index.js",
+      "index.mjs",
+      "index.cjs",
+    ].map((entry) => NodePath.join(base, entry)),
   ];
   for (const candidate of candidates) {
     if (!NodeFS.existsSync(candidate) || !NodeFS.statSync(candidate).isFile()) continue;
@@ -533,7 +591,7 @@ const collectBuildScriptGraph = (rootDir: string): ReadonlySet<string> => {
       continue;
     }
     for (const match of stripJavaScriptComments(source).matchAll(importSpecifierPattern)) {
-      const specifier = match[2];
+      const specifier = staticImportSpecifier(match, filePath);
       if (!specifier) continue;
       const imported = resolveLocalImport(rootDir, filePath, specifier);
       if (imported) pending.push(imported);
@@ -731,18 +789,21 @@ const normalizeManifestText = (relativePath: string, text: string): string => {
   }
 };
 
-const gitFileAt = async (
-  git: GitRunner,
-  tag: string,
-  relativePath: string,
-): Promise<string | undefined> => gitMay(git, ["show", `${tag}:${relativePath}`]);
-
 const gitObjectTypeAt = async (
   git: GitRunner,
   tag: string,
   relativePath: string,
 ): Promise<string | undefined> =>
   (await gitMay(git, ["cat-file", "-t", `${tag}:${relativePath}`]))?.trim();
+
+const gitFileAt = async (
+  git: GitRunner,
+  tag: string,
+  relativePath: string,
+): Promise<string | undefined> => {
+  if ((await gitObjectTypeAt(git, tag, relativePath)) !== "blob") return undefined;
+  return gitMay(git, ["show", `${tag}:${relativePath}`]);
+};
 
 const historicalImportCandidates = (importer: string, specifier: string): ReadonlyArray<string> => {
   if (!specifier.startsWith(".")) return [];
@@ -755,9 +816,15 @@ const historicalImportCandidates = (importer: string, specifier: string): Readon
     ...[".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs"].map(
       (extension) => `${base}${extension}`,
     ),
-    ...["index.ts", "index.tsx", "index.mts", "index.js", "index.mjs"].map((entry) =>
-      NodePath.posix.join(base, entry),
-    ),
+    ...[
+      "index.ts",
+      "index.tsx",
+      "index.mts",
+      "index.cts",
+      "index.js",
+      "index.mjs",
+      "index.cjs",
+    ].map((entry) => NodePath.posix.join(base, entry)),
   ];
 };
 
@@ -775,7 +842,7 @@ const collectHistoricalBuildScriptGraph = async (
     if (source === undefined) continue;
     graph.add(relativePath);
     for (const match of stripJavaScriptComments(source).matchAll(importSpecifierPattern)) {
-      const specifier = match[2];
+      const specifier = staticImportSpecifier(match, relativePath);
       if (!specifier) continue;
       for (const candidate of historicalImportCandidates(relativePath, specifier)) {
         if ((await gitObjectTypeAt(git, tag, candidate)) === "blob") {
