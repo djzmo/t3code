@@ -18,7 +18,7 @@ const temporaryRoots: string[] = [];
 const INTEGRITY =
   "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";
 
-const write = (root: string, relativePath: string, content: string) => {
+const write = (root: string, relativePath: string, content: string | Uint8Array) => {
   const target = NodePath.join(root, relativePath);
   NodeFS.mkdirSync(NodePath.dirname(target), { recursive: true });
   NodeFS.writeFileSync(target, content);
@@ -168,7 +168,7 @@ const check = (root: string) =>
     verifyExecutableSurface: async () => undefined,
   });
 
-const tarEntry = (name: string, content: string): NodeBuffer.Buffer => {
+const tarEntry = (name: string, content: string | Uint8Array): NodeBuffer.Buffer => {
   const bytes = NodeBuffer.Buffer.from(content);
   const header = NodeBuffer.Buffer.alloc(512);
   header.write(name, 0, 100, "utf8");
@@ -187,15 +187,30 @@ const tarEntry = (name: string, content: string): NodeBuffer.Buffer => {
   return NodeBuffer.Buffer.concat([header, bytes, padding]);
 };
 
-const packedFixture = (expectedIntegrity: string) => {
+type PackedFixtureFile = {
+  readonly path: string;
+  readonly content: string | Uint8Array;
+};
+
+type PackedFixtureOptions = {
+  readonly trackedDist?: boolean;
+  readonly localBuildFiles?: ReadonlyArray<PackedFixtureFile>;
+  readonly extraTarEntries?: ReadonlyArray<PackedFixtureFile>;
+};
+
+const packedFixture = (expectedIntegrity: string, options: PackedFixtureOptions = {}) => {
   const root = fixture();
   const packageManifest = {
     name: "t3",
     version: "0.0.1",
     bin: { t3: "dist/t3.js" },
+    files: ["dist"],
   };
   write(root, "apps/server/package.json", JSON.stringify(packageManifest, null, 2));
   write(root, "apps/server/dist/t3.js", "#!/usr/bin/env node\n");
+  for (const file of options.localBuildFiles ?? []) {
+    write(root, `apps/server/dist/${file.path}`, file.content);
+  }
   write(
     root,
     "apps/desktop/src-tauri/remote-cli.json",
@@ -205,18 +220,27 @@ const packedFixture = (expectedIntegrity: string) => {
       2,
     ),
   );
-  const tarBytes = NodeBuffer.Buffer.concat([
+  const tarEntries = [
     tarEntry("package/package.json", `${JSON.stringify(packageManifest)}\n`),
     tarEntry("package/dist/t3.js", "#!/usr/bin/env node\n"),
+    ...(options.localBuildFiles ?? []).map((file) =>
+      tarEntry(`package/dist/${file.path}`, file.content),
+    ),
+    ...(options.extraTarEntries ?? []).map((file) =>
+      tarEntry(`package/${file.path}`, file.content),
+    ),
     NodeBuffer.Buffer.alloc(1024),
-  ]);
+  ];
+  const tarBytes = NodeBuffer.Buffer.concat(tarEntries);
   const compressedBytes = NodeZlib.gzipSync(tarBytes);
   const archivePath = NodePath.join(root, "t3-0.0.1.tgz");
   NodeFS.writeFileSync(archivePath, compressedBytes);
   const delegate = baselineGit(root);
   const git: GitRunner = async (args) => {
     if (args[0] === "ls-tree" && args.includes("apps/server")) {
-      return "apps/server/package.json\napps/server/dist/t3.js\n";
+      return options.trackedDist === false
+        ? "apps/server/package.json\n"
+        : "apps/server/package.json\napps/server/dist/t3.js\n";
     }
     return delegate(args);
   };
@@ -949,11 +973,84 @@ describe("remote CLI provenance policy", () => {
 });
 
 describe("remote CLI executable surface", () => {
+  it("accepts generated untracked dist files selected by the package manifest", async () => {
+    const packageManifest = JSON.stringify({
+      name: "t3",
+      version: "0.0.1",
+      bin: { t3: "dist/t3.js" },
+      files: ["dist"],
+    });
+    const tarBytes = NodeBuffer.Buffer.concat([
+      tarEntry("package/package.json", `${packageManifest}\n`),
+      tarEntry("package/dist/t3.js", "#!/usr/bin/env node\n"),
+      NodeBuffer.Buffer.alloc(1024),
+    ]);
+    const compressedBytes = NodeZlib.gzipSync(tarBytes);
+    const validIntegrity = `sha512-${NodeCrypto.createHash("sha512").update(compressedBytes).digest("base64")}`;
+    const packed = packedFixture(validIntegrity, { trackedDist: false });
+
+    await expect(
+      runWithDefaultSurface(packed.root, packed.archivePath, packed.git, validIntegrity),
+    ).resolves.toMatchObject({ packageVersion: "0.0.1" });
+  });
+
+  it("rejects a tar entry outside the pinned package surface", async () => {
+    const packageManifest = JSON.stringify({
+      name: "t3",
+      version: "0.0.1",
+      bin: { t3: "dist/t3.js" },
+      files: ["dist"],
+    });
+    const tarBytes = NodeBuffer.Buffer.concat([
+      tarEntry("package/package.json", `${packageManifest}\n`),
+      tarEntry("package/dist/t3.js", "#!/usr/bin/env node\n"),
+      tarEntry("package/unexpected.txt", "must not ship\n"),
+      NodeBuffer.Buffer.alloc(1024),
+    ]);
+    const compressedBytes = NodeZlib.gzipSync(tarBytes);
+    const validIntegrity = `sha512-${NodeCrypto.createHash("sha512").update(compressedBytes).digest("base64")}`;
+    const packed = packedFixture(validIntegrity, {
+      trackedDist: false,
+      extraTarEntries: [{ path: "unexpected.txt", content: "must not ship\n" }],
+    });
+
+    await expect(
+      runWithDefaultSurface(packed.root, packed.archivePath, packed.git, validIntegrity),
+    ).rejects.toMatchObject<RemoteCliPinError>({ code: "surface-mismatch" });
+  });
+
+  it("compares generated binary files byte-for-byte", async () => {
+    const binary = new Uint8Array([0x00, 0xff, 0x80, 0xc3, 0x28, 0x00]);
+    const packageManifest = JSON.stringify({
+      name: "t3",
+      version: "0.0.1",
+      bin: { t3: "dist/t3.js" },
+      files: ["dist"],
+    });
+    const tarBytes = NodeBuffer.Buffer.concat([
+      tarEntry("package/package.json", `${packageManifest}\n`),
+      tarEntry("package/dist/t3.js", "#!/usr/bin/env node\n"),
+      tarEntry("package/dist/icon.ico", binary),
+      NodeBuffer.Buffer.alloc(1024),
+    ]);
+    const compressedBytes = NodeZlib.gzipSync(tarBytes);
+    const validIntegrity = `sha512-${NodeCrypto.createHash("sha512").update(compressedBytes).digest("base64")}`;
+    const packed = packedFixture(validIntegrity, {
+      trackedDist: false,
+      localBuildFiles: [{ path: "icon.ico", content: binary }],
+    });
+
+    await expect(
+      runWithDefaultSurface(packed.root, packed.archivePath, packed.git, validIntegrity),
+    ).resolves.toMatchObject({ packageVersion: "0.0.1" });
+  });
+
   it("checks compressed npm-pack integrity through the default verifier", async () => {
     const packageManifest = JSON.stringify({
       name: "t3",
       version: "0.0.1",
       bin: { t3: "dist/t3.js" },
+      files: ["dist"],
     });
     const tarBytes = NodeBuffer.Buffer.concat([
       tarEntry("package/package.json", `${packageManifest}\n`),

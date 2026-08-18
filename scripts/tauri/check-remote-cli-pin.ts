@@ -91,7 +91,7 @@ export type ExecutableSurfaceInput = {
   /** Paths produced by the local tag build; each must be present in npm pack. */
   readonly localBuildFiles?: ReadonlyArray<string>;
   /** Optional exact bytes for local-build files, keyed by package path. */
-  readonly localBuildContent?: Readonly<Record<string, string | Uint8Array>>;
+  readonly localBuildContent?: Readonly<Record<string, Uint8Array>>;
 };
 
 export type RemoteCliPinCheckerOptions = {
@@ -1471,10 +1471,7 @@ const defaultExecutableSurface = async (input: ExecutableSurfaceInput): Promise<
           `npm pack is missing local-build file '${localBuildFile}'.`,
         );
       }
-      const bytes =
-        typeof expectedContent === "string"
-          ? NodeBuffer.Buffer.from(expectedContent)
-          : NodeBuffer.Buffer.from(expectedContent);
+      const bytes = NodeBuffer.Buffer.from(expectedContent);
       if (!actual.equals(bytes)) {
         throw new RemoteCliPinError(
           "surface-mismatch",
@@ -1505,6 +1502,7 @@ const defaultExecutableSurface = async (input: ExecutableSurfaceInput): Promise<
 const expectedSurfaceFilesAtTag = async (
   tag: string,
   git: GitRunner,
+  localBuildFiles: ReadonlyArray<string> = [],
 ): Promise<ReadonlyArray<string>> => {
   const manifestText = await gitFileAt(git, tag, "apps/server/package.json");
   const manifest = manifestText === undefined ? {} : asRecord(JSON.parse(manifestText) as unknown);
@@ -1520,16 +1518,20 @@ const expectedSurfaceFilesAtTag = async (
     : [];
   const expected = new Set<string>(["package/package.json"]);
   const selected = files.length > 0 ? files : ["dist"];
+  const matchesSurfaceEntry = (sourceFile: string, normalized: string): boolean =>
+    sourceFile === normalized ||
+    sourceFile.startsWith(`${normalized}/`) ||
+    (normalized.endsWith("/**") && sourceFile.startsWith(`${normalized.slice(0, -3)}/`));
   for (const entry of selected) {
     const normalized = entry.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/$/, "");
     for (const sourceFile of sourceFiles) {
-      if (
-        sourceFile === normalized ||
-        sourceFile.startsWith(`${normalized}/`) ||
-        (normalized.endsWith("/**") && sourceFile.startsWith(`${normalized.slice(0, -3)}/`))
-      ) {
-        expected.add(`package/${sourceFile}`);
-      }
+      if (matchesSurfaceEntry(sourceFile, normalized)) expected.add(`package/${sourceFile}`);
+    }
+    for (const localBuildFile of localBuildFiles) {
+      const packagePath = localBuildFile.startsWith("package/")
+        ? localBuildFile.slice("package/".length)
+        : localBuildFile;
+      if (matchesSurfaceEntry(packagePath, normalized)) expected.add(`package/${packagePath}`);
     }
   }
   return [...expected].toSorted();
@@ -1636,15 +1638,15 @@ export const verifyRemoteCliPin = async (
     }
   } else {
     provenance = { status: "unattested", reason: "No SLSA provenance attestation was published." };
-    const expectedFiles = await expectedSurfaceFilesAtTag(pin.upstreamTag, git);
-    const localBuildContent: Record<string, string> = {};
+    const localBuildContent: Record<string, Uint8Array> = {};
     const localBuildFiles = listFiles(rootDir, NodePath.join(rootDir, "apps/server/dist")).map(
       (file) => {
         const packagePath = `package/${file.slice("apps/server/".length)}`;
-        localBuildContent[packagePath] = NodeFS.readFileSync(NodePath.join(rootDir, file), "utf8");
+        localBuildContent[packagePath] = NodeFS.readFileSync(NodePath.join(rootDir, file));
         return packagePath;
       },
     );
+    const expectedFiles = await expectedSurfaceFilesAtTag(pin.upstreamTag, git, localBuildFiles);
     const integrity = pin.tarballIntegrity;
     if (integrity === undefined) {
       if (!options.record) {
