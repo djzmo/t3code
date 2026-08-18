@@ -319,6 +319,7 @@ impl<P: ShellPlatform> ShellDispatcher<P> {
             RpcMethod::AppQuit
                 | RpcMethod::AppExit
                 | RpcMethod::AppRelaunch
+                | RpcMethod::UpdaterInstall
                 | RpcMethod::AppFocus
                 | RpcMethod::AppShutdownComplete
         ) {
@@ -650,7 +651,9 @@ mod tests {
     use crate::app_events::{AppEvent, NativeEvent};
     use crate::host::{BrokerConfig, ProcessBroker};
     use crate::lifecycle::{Continuation, QuitReason};
-    use crate::rpc::protocol::{JsonRpcVersion, ProcessKind, ProcessStreamMode, RpcId};
+    use crate::rpc::protocol::{
+        JsonRpcVersion, ProcessKind, ProcessStreamMode, RpcId, UpdaterInstallParams,
+    };
     use std::collections::BTreeMap;
 
     struct FakePlatform {
@@ -870,6 +873,115 @@ mod tests {
     }
 
     #[test]
+    fn updater_install_notification_starts_install_shutdown() {
+        let mut dispatch = dispatcher();
+        dispatch
+            .notification(notification(
+                RpcMethod::UpdaterInstall,
+                Some(RpcParams::UpdaterInstall(UpdaterInstallParams {
+                    relaunch: true,
+                })),
+            ))
+            .expect("updater.install should decode and dispatch");
+
+        assert_eq!(
+            dispatch.app_state(),
+            State::QuitRequested {
+                reason: QuitReason::Updater,
+                continuation: Continuation::Install,
+            }
+        );
+        assert_eq!(
+            app_effects(&dispatch),
+            &[
+                AppEffect::PreventExit,
+                AppEffect::BeforeQuit {
+                    reason: QuitReason::Updater,
+                },
+            ]
+        );
+        assert!(!dispatch.broker_cleanup_applied());
+    }
+
+    #[test]
+    fn updater_install_upgrades_pending_user_exit_without_duplicate_cleanup() {
+        let mut dispatch = dispatcher();
+        dispatch
+            .dispatch_app_event(AppEvent::Native(NativeEvent::BeforeQuit {
+                reason: QuitReason::User,
+            }))
+            .expect("user quit should enter pending state");
+        assert_eq!(
+            dispatch.app_state(),
+            State::QuitRequested {
+                reason: QuitReason::User,
+                continuation: Continuation::Exit(0),
+            }
+        );
+        let pending_effects = app_effects(&dispatch).to_vec();
+
+        dispatch
+            .notification(notification(
+                RpcMethod::UpdaterInstall,
+                Some(RpcParams::UpdaterInstall(UpdaterInstallParams {
+                    relaunch: false,
+                })),
+            ))
+            .expect("updater.install should upgrade a pending quit");
+        assert_eq!(
+            dispatch.app_state(),
+            State::QuitRequested {
+                reason: QuitReason::Updater,
+                continuation: Continuation::Install,
+            }
+        );
+        // The upgrade is a continuation change only.  It must not repeat the
+        // already-issued native prevent/before-quit notifications.
+        assert_eq!(app_effects(&dispatch), pending_effects.as_slice());
+        assert!(!dispatch.broker_cleanup_applied());
+
+        dispatch
+            .notification(empty_notification(RpcMethod::AppQuit))
+            .expect("host acknowledgement should authorize install");
+        assert_eq!(
+            dispatch.app_state(),
+            State::ExitAuthorized {
+                continuation: Continuation::Install,
+            }
+        );
+        assert_eq!(
+            app_effects(&dispatch),
+            &[
+                AppEffect::PreventExit,
+                AppEffect::BeforeQuit {
+                    reason: QuitReason::User,
+                },
+                AppEffect::BeforeQuitResponse { prevented: true },
+                AppEffect::Run(Continuation::Install),
+            ]
+        );
+        assert!(dispatch.broker_cleanup_applied());
+
+        // A repeated host acknowledgement is a pass-through only.  Cleanup
+        // remains one-shot and no second shutdown/run action is emitted.
+        dispatch
+            .notification(empty_notification(RpcMethod::AppQuit))
+            .expect("repeated host acknowledgement should remain valid");
+        assert_eq!(
+            app_effects(&dispatch).last(),
+            Some(&AppEffect::PassThrough(Continuation::Install))
+        );
+        assert_eq!(
+            app_effects(&dispatch)
+                .iter()
+                .filter(|effect| matches!(effect, AppEffect::Run(Continuation::Install)))
+                .count(),
+            1
+        );
+        assert!(dispatch.broker_cleanup_applied());
+    }
+
+    #[test]
     fn shutdown_complete_acknowledges_quit_before_run() {
         let mut dispatch = dispatcher();
         dispatch
@@ -995,6 +1107,10 @@ mod tests {
             notification(
                 RpcMethod::AppShutdownComplete,
                 Some(RpcParams::AppExit(AppExitParams { code: 0 })),
+            ),
+            notification(
+                RpcMethod::UpdaterInstall,
+                Some(RpcParams::Empty(EmptyParams {})),
             ),
         ] {
             let result = dispatch.notification(invalid);

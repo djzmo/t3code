@@ -12,7 +12,7 @@ use crate::lifecycle::{
 };
 use crate::rpc::protocol::{
     AppBeforeQuitParams, AppExitParams, AppFocusParams, RpcEnvelope, RpcMethod, RpcNotification,
-    RpcParams, RpcResponse, RpcResult,
+    RpcParams, RpcResponse, RpcResult, UpdaterInstallParams,
 };
 
 /// The platform facts needed for the last-window and activation rules.
@@ -49,9 +49,20 @@ pub enum NativeEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostNotification {
     Quit,
-    Exit { code: i32 },
+    Exit {
+        code: i32,
+    },
     Relaunch,
-    Focus { steal: bool },
+    /// Request an updater installation.  The lifecycle currently selects the
+    /// install continuation regardless of `relaunch`, but retain the typed
+    /// value so malformed or future protocol payloads cannot be accepted as a
+    /// bare lifecycle signal.
+    UpdaterInstall {
+        relaunch: bool,
+    },
+    Focus {
+        steal: bool,
+    },
     ShutdownComplete,
 }
 
@@ -236,6 +247,9 @@ fn reduce_host(state: State, notification: HostNotification) -> AppTransition {
             lifecycle_transition(state, LifecycleEvent::HostAppExit { code })
         }
         HostNotification::Relaunch => lifecycle_transition(state, LifecycleEvent::HostAppRelaunch),
+        HostNotification::UpdaterInstall { .. } => {
+            lifecycle_transition(state, LifecycleEvent::UpdaterInstall)
+        }
         HostNotification::ShutdownComplete => {
             lifecycle_transition(state, LifecycleEvent::HostShutdownComplete)
         }
@@ -276,6 +290,14 @@ pub fn decode_notification(
             _ => Err(DecodeError::InvalidParams(RpcMethod::AppExit)),
         },
         RpcMethod::AppRelaunch => require_empty(notification, HostNotification::Relaunch),
+        RpcMethod::UpdaterInstall => match notification.params.as_ref() {
+            Some(RpcParams::UpdaterInstall(UpdaterInstallParams { relaunch })) => {
+                Ok(HostNotification::UpdaterInstall {
+                    relaunch: *relaunch,
+                })
+            }
+            _ => Err(DecodeError::InvalidParams(RpcMethod::UpdaterInstall)),
+        },
         RpcMethod::AppFocus => match notification.params.as_ref() {
             Some(RpcParams::AppFocus(AppFocusParams { steal })) => {
                 Ok(HostNotification::Focus { steal: *steal })
@@ -380,7 +402,7 @@ mod tests {
     use crate::lifecycle::Continuation;
     use crate::rpc::protocol::{
         AppExitParams, AppFocusParams, EmptyParams, JsonRpcVersion, PreventedResult, RpcId,
-        RpcRequest, RpcSuccessResponse,
+        RpcRequest, RpcSuccessResponse, UpdaterInstallParams,
     };
 
     fn lifecycle_effects(result: &AppTransition) -> Vec<LifecycleAction> {
@@ -566,6 +588,63 @@ mod tests {
             )
             .effects,
             vec![Effect::FocusMainWindow { steal: true }]
+        );
+    }
+
+    #[test]
+    fn updater_install_reduces_to_install_continuation_and_preserves_relaunch() {
+        let notification = RpcNotification {
+            jsonrpc: JsonRpcVersion::V2,
+            method: RpcMethod::UpdaterInstall,
+            params: Some(RpcParams::UpdaterInstall(UpdaterInstallParams {
+                relaunch: true,
+            })),
+        };
+        assert_eq!(
+            decode_notification(&notification),
+            Ok(HostNotification::UpdaterInstall { relaunch: true })
+        );
+
+        let result = reduce(
+            Platform::Linux,
+            State::Running,
+            AppEvent::Host(HostNotification::UpdaterInstall { relaunch: true }),
+        );
+        assert_eq!(
+            result.state,
+            State::QuitRequested {
+                reason: LifecycleQuitReason::Updater,
+                continuation: Continuation::Install,
+            }
+        );
+        assert_eq!(
+            lifecycle_effects(&result),
+            vec![
+                LifecycleAction::PreventExit,
+                LifecycleAction::BeforeQuit {
+                    reason: LifecycleQuitReason::Updater,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn updater_install_requires_typed_relaunch_params() {
+        let base = RpcNotification {
+            jsonrpc: JsonRpcVersion::V2,
+            method: RpcMethod::UpdaterInstall,
+            params: None,
+        };
+        assert_eq!(
+            decode_notification(&base),
+            Err(DecodeError::InvalidParams(RpcMethod::UpdaterInstall))
+        );
+        assert_eq!(
+            decode_notification(&RpcNotification {
+                params: Some(RpcParams::Empty(EmptyParams {})),
+                ..base
+            }),
+            Err(DecodeError::InvalidParams(RpcMethod::UpdaterInstall))
         );
     }
 
@@ -816,6 +895,7 @@ mod tests {
             HostNotification::Quit,
             HostNotification::Exit { code: 0 },
             HostNotification::Relaunch,
+            HostNotification::UpdaterInstall { relaunch: true },
             HostNotification::Focus { steal: false },
             HostNotification::ShutdownComplete,
         ];
