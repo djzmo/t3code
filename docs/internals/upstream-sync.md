@@ -63,7 +63,9 @@ Do not edit `packages/contracts`, `apps/server`, or the root `vite.config.ts` to
 pass. A server-closure change requires the separately authorized fork-package contingency;
 there is no default fork npm publication.
 
-The initial V3a registry and provenance verification passed on 2026-08-18 with a full,
-non-shallow checkout. The checker confirmed tag ancestry, the computed server/build-script
-closure, the npm package surface, and the Sigstore/SLSA claims. No npm publication or upstream
-contact was performed.
+The V3a registry and provenance verification passed again on 2026-08-19 at commit
+`cc39346deaa79020a9dc6170e2cb044867e436aa` with a full, non-shallow checkout. The checker
+confirmed tag ancestry, the computed server/build-script closure, the npm package surface,
+and the Sigstore/SLSA claims. Its focused fallback suite also passed 43 tests, including
+generated `dist` files and binary package content. No npm publication or upstream contact was
+performed.
