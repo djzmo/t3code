@@ -9,10 +9,10 @@ V3a remote-CLI checker before building the desktop shell.
 
 ## Phase 0 baseline
 
-The implementation checkout is currently at commit `a4cc1367b03ee0c1dc2b50fceac81ef5e63212e2`,
-the upstream tag `v0.0.34-nightly.20260817.1120`. The canonical compatibility pin remains
-the earlier approved release tag `v0.0.34-nightly.20260817.1116` until the owner explicitly
-retargets it. That tag is an ancestor of the implementation checkout.
+Phase 0 started from commit `a4cc1367b03ee0c1dc2b50fceac81ef5e63212e2`, the upstream tag
+`v0.0.34-nightly.20260817.1120`. The canonical compatibility pin remains the earlier approved
+release tag `v0.0.34-nightly.20260817.1116` until the owner explicitly retargets it. That tag
+is an ancestor of the fork's implementation history.
 
 The commits between those tags change only web/mobile presentation code. They do not change
 the server compatibility closure: `apps/server/**`, the server's transitive workspace
@@ -31,9 +31,9 @@ The current pin is:
 
 `packageSpec` is derived from the exact tag by removing only the leading `v`; it is not
 derived from `apps/server/package.json`, whose source version is rewritten only when upstream
-publishes. `tarballIntegrity` is intentionally absent until the V3a checker evaluates the
-tag's npm provenance. It may be recorded only by the checker's fallback path when the pinned
-package is unattested at pin time.
+publishes. The V3a checker verified this package's Sigstore/SLSA provenance on 2026-08-18, so
+`tarballIntegrity` is intentionally absent. It may be recorded only by the checker's fallback
+path when the pinned package is unattested at pin time.
 
 ## Product and compatibility versions
 
@@ -63,5 +63,7 @@ Do not edit `packages/contracts`, `apps/server`, or the root `vite.config.ts` to
 pass. A server-closure change requires the separately authorized fork-package contingency;
 there is no default fork npm publication.
 
-The initial V3a checker and its provenance/network verification are intentionally deferred;
-this Phase 0 policy record performs no registry access, npm publication, or upstream contact.
+The initial V3a registry and provenance verification passed on 2026-08-18 with a full,
+non-shallow checkout. The checker confirmed tag ancestry, the computed server/build-script
+closure, the npm package surface, and the Sigstore/SLSA claims. No npm publication or upstream
+contact was performed.
