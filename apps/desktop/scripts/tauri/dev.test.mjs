@@ -4,11 +4,13 @@ import {
   DEV_WEB_GRAPH_ARGS,
   assertClerkAbsent,
   createDevelopmentOverlay,
+  createSpawnOptions,
   findClerkConfiguration,
   normalizeWorktreePath,
   resolveDevelopmentCommands,
   resolveDevelopmentIdentifier,
   resolveCanonicalWorktreePath,
+  terminateChild,
   worktreeIdentity,
 } from "./dev.mjs";
 
@@ -78,6 +80,72 @@ describe("Tauri development launcher", () => {
       "--config",
       "C:/temp/tauri.dev.conf.json",
       "--debug",
+    ]);
+  });
+
+  it("detaches Unix children so shutdown can address their process groups", () => {
+    assert.equal(
+      createSpawnOptions({ cwd: "/worktrees/agent-nanoni", env: {}, platform: "linux" }).detached,
+      true,
+    );
+    assert.equal(
+      createSpawnOptions({ cwd: "C:/worktrees/agent-nanoni", env: {}, platform: "win32" }).detached,
+      undefined,
+    );
+  });
+
+  it("terminates a Unix child process group using only the captured PID", () => {
+    const calls = [];
+    const child = {
+      pid: 31415,
+      exitCode: null,
+      signalCode: null,
+      kill: () => calls.push(["child", "SIGTERM"]),
+    };
+
+    terminateChild(child, {
+      platform: "linux",
+      killProcess: (...args) => calls.push(["group", ...args]),
+    });
+
+    assert.deepEqual(calls, [["group", -31415, "SIGTERM"]]);
+  });
+
+  it("falls back to the captured child handle when the Unix group is gone", () => {
+    const calls = [];
+    const child = {
+      pid: 27182,
+      exitCode: null,
+      signalCode: null,
+      kill: (signal) => calls.push(["child", signal]),
+    };
+
+    terminateChild(child, {
+      platform: "darwin",
+      killProcess: () => {
+        throw new Error("ESRCH");
+      },
+    });
+
+    assert.deepEqual(calls, [["child", "SIGTERM"]]);
+  });
+
+  it("keeps Windows shutdown scoped to the captured PID taskkill", () => {
+    const calls = [];
+    const child = {
+      pid: 4242,
+      exitCode: null,
+      signalCode: null,
+      kill: () => calls.push(["child", "SIGTERM"]),
+    };
+
+    terminateChild(child, {
+      platform: "win32",
+      spawnSync: (...args) => calls.push(["taskkill", ...args]),
+    });
+
+    assert.deepEqual(calls, [
+      ["taskkill", "taskkill", ["/PID", "4242", "/T", "/F"], { stdio: "ignore" }],
     ]);
   });
 });

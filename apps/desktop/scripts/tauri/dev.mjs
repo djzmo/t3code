@@ -93,6 +93,19 @@ function executable(name) {
   return process.platform === "win32" ? `${name}.cmd` : name;
 }
 
+export function createSpawnOptions({ cwd, env, platform = process.platform }) {
+  return {
+    cwd,
+    env,
+    stdio: "inherit",
+    windowsHide: true,
+    // A detached Unix child is the leader of its own process group. This lets
+    // shutdown target the group using the PID captured from spawn(), so any
+    // descendants (for example the Vite process tree) are cleaned up too.
+    ...(platform === "win32" ? {} : { detached: true }),
+  };
+}
+
 export function resolveDevelopmentCommands({ overlayPath, extraArgs = [] }) {
   return {
     web: {
@@ -126,16 +139,36 @@ function writeOverlay({ directory, identifier, devUrl }) {
   return overlayPath;
 }
 
-function terminateChild(child) {
+export function terminateChild(
+  child,
+  {
+    platform = process.platform,
+    killProcess = process.kill,
+    spawnSync = NodeChildProcess.spawnSync,
+  } = {},
+) {
   if (!child || child.exitCode !== null || child.signalCode !== null) {
     return;
   }
 
-  if (process.platform === "win32" && child.pid !== undefined) {
-    NodeChildProcess.spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+  const hasCapturedPid =
+    typeof child.pid === "number" && Number.isInteger(child.pid) && child.pid > 0;
+
+  if (platform === "win32" && hasCapturedPid) {
+    spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
       stdio: "ignore",
     });
     return;
+  }
+
+  if (platform !== "win32" && hasCapturedPid) {
+    try {
+      // Negative PIDs address the process group led by the captured child PID.
+      killProcess(-child.pid, "SIGTERM");
+      return;
+    } catch {
+      // Fall back to the child handle if the process group no longer exists.
+    }
   }
 
   child.kill("SIGTERM");
@@ -171,12 +204,7 @@ async function run() {
     overlayPath,
     extraArgs: process.argv.slice(2),
   });
-  const spawnOptions = {
-    cwd: repositoryRoot,
-    env: environment,
-    stdio: "inherit",
-    windowsHide: true,
-  };
+  const spawnOptions = createSpawnOptions({ cwd: repositoryRoot, env: environment });
   const web = NodeChildProcess.spawn(commands.web.command, commands.web.args, spawnOptions);
   const tauri = NodeChildProcess.spawn(commands.tauri.command, commands.tauri.args, {
     ...spawnOptions,
