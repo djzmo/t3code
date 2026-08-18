@@ -82,6 +82,7 @@ it.live.skipIf(!existsSync(serverEntryPath))(
   "boots DesktopApp against the real server and shuts down through Tauri lifecycle",
   () =>
     Effect.gen(function* () {
+      assert.match(process.version, /^v24\./, "real-host integration requires repository Node 24");
       const { home } = yield* withTemporaryHome;
       const fake = makeFakeShell({
         hello: {
@@ -152,6 +153,13 @@ it.live.skipIf(!existsSync(serverEntryPath))(
       assert.equal(locale, "en-US");
       assert.isArray(bootstraps);
       assert.isAtLeast(fake.registrations.length, 1);
+      const windowCreate = fake.requests.find(({ method }) => method === "window.create");
+      assert.isDefined(windowCreate);
+      const initScripts = (windowCreate?.params as { readonly initScripts?: readonly string[] })
+        .initScripts;
+      assert.lengthOf(initScripts ?? [], 1);
+      assert.include(initScripts?.[0] ?? "", "__NANONI_BOOT__");
+      assert.include(initScripts?.[0] ?? "", "desktopBridge");
 
       const beforeQuit = fake.emitAppEvent("app.before-quit", { reason: "user" });
       assert.deepEqual(beforeQuit, { prevented: true });
