@@ -1,3 +1,5 @@
+// @effect-diagnostics globalTimers:off - The hard-exit watchdog must survive an interrupted Effect runtime.
+
 import * as NodeOS from "node:os";
 
 import type * as TauriEnvironment from "./app/TauriEnvironment.ts";
@@ -51,6 +53,42 @@ const hostDirectory = (): string => {
   return separator < 0 ? process.cwd() : entryPath.slice(0, separator);
 };
 
+export const HOST_HARD_EXIT_TIMEOUT_MS = 5_000;
+
+export interface HostTransportCloseDependencies {
+  readonly closeBroker: (cause?: unknown) => void;
+  readonly requestShutdown: () => void;
+  readonly hardExit: (code: number) => void;
+  readonly scheduleHardExit?: (
+    callback: () => void,
+    delayMs: number,
+  ) => { readonly unref: () => void };
+}
+
+/**
+ * Turn shell transport loss into the host's normal Effect shutdown, with the
+ * L7 hard-exit deadline as a final containment barrier. The handler is
+ * one-shot because both stdin EOF and the process cleanup path can report the
+ * same close.
+ */
+export const createHostTransportCloseHandler = (
+  dependencies: HostTransportCloseDependencies,
+): ((cause?: unknown) => void) => {
+  let closing = false;
+  const scheduleHardExit =
+    dependencies.scheduleHardExit ??
+    ((callback: () => void, delayMs: number) => setTimeout(callback, delayMs));
+
+  return (cause?: unknown) => {
+    if (closing) return;
+    closing = true;
+    dependencies.closeBroker(cause);
+    const deadline = scheduleHardExit(() => dependencies.hardExit(1), HOST_HARD_EXIT_TIMEOUT_MS);
+    deadline.unref();
+    dependencies.requestShutdown();
+  };
+};
+
 export const startHost = async (): Promise<void> => {
   const transport = createNodeStdioTransport();
   const client = new ShellClientRuntime({ transport });
@@ -59,7 +97,12 @@ export const startHost = async (): Promise<void> => {
 
   const ipcMain = TauriIpcMain.make();
   const broker = makeRpcProcessBroker(processPeer(client));
-  const removeClose = transport.onClose((cause) => broker.close(cause));
+  const onTransportClose = createHostTransportCloseHandler({
+    closeBroker: (cause) => broker.close(cause),
+    requestShutdown: () => process.kill(process.pid, "SIGTERM"),
+    hardExit: (code) => process.exit(code),
+  });
+  const removeClose = transport.onClose(onTransportClose);
   const removeIpcInvoke = client.onRequest("ipc.invoke", async ({ channel, payload }) => ({
     result: await ipcMain.invoke(channel, payload),
   }));

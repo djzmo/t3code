@@ -1,15 +1,24 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as PlatformError from "effect/PlatformError";
+import * as Queue from "effect/Queue";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 
 import { makeBrokeredChildSpawner } from "./BrokeredChildSpawner.ts";
 import type { ProcessSpawnParams, RpcProcessBroker } from "./RpcProcessBroker.ts";
 
-const makeHandle = (): ChildProcessSpawner.ChildProcessHandle =>
+type InputWriter = (
+  fd: number,
+  bytes: Uint8Array,
+) => Effect.Effect<void, PlatformError.PlatformError>;
+
+const makeHandle = (
+  writeInput: InputWriter = () => Effect.void,
+): ChildProcessSpawner.ChildProcessHandle =>
   ChildProcessSpawner.makeHandle({
     pid: ChildProcessSpawner.ProcessId(42),
     exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
@@ -19,7 +28,7 @@ const makeHandle = (): ChildProcessSpawner.ChildProcessHandle =>
     stdout: Stream.make(new TextEncoder().encode("hello\n")),
     stderr: Stream.empty,
     all: Stream.make(new TextEncoder().encode("hello\n")),
-    getInputFd: () => Sink.forEach(() => Effect.void),
+    getInputFd: (fd) => Sink.forEach((bytes) => writeInput(fd, bytes)),
     getOutputFd: () => Stream.empty,
     unref: Effect.succeed(Effect.void),
   });
@@ -82,6 +91,109 @@ describe("BrokeredChildSpawner", () => {
           { fd: 5, direction: "output" },
         ],
       });
+    }),
+  );
+
+  it.effect("forwards additional input streams after the broker registers the child", () =>
+    Effect.gen(function* () {
+      const writes = yield* Queue.unbounded<{ readonly fd: number; readonly bytes: Uint8Array }>();
+      let received: ProcessSpawnParams | undefined;
+      const broker: RpcProcessBroker = {
+        spawn: (params: ProcessSpawnParams) => {
+          received = params;
+          return Effect.succeed({
+            _tag: "registered",
+            processId: "process-input",
+            pid: ChildProcessSpawner.ProcessId(44),
+            registrationId: "registration-input",
+            handle: makeHandle((fd, bytes) => Queue.offer(writes, { fd, bytes })),
+          } as const);
+        },
+        close: () => undefined,
+        activeProcessCount: () => 1,
+      };
+      const spawner = makeBrokeredChildSpawner({ broker });
+      const bytes = (value: string) => new TextEncoder().encode(value);
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* spawner.spawn(
+            command({
+              additionalFds: {
+                fd3: {
+                  type: "input",
+                  stream: Stream.make(bytes("bootstrap-1"), bytes("bootstrap-2")),
+                },
+                fd4: {
+                  type: "input",
+                  stream: Stream.make(bytes("telemetry-1"), bytes("telemetry-2")),
+                },
+              },
+            }),
+          );
+
+          const receivedWrites = [
+            yield* Queue.take(writes),
+            yield* Queue.take(writes),
+            yield* Queue.take(writes),
+            yield* Queue.take(writes),
+          ];
+          assert.deepEqual(
+            receivedWrites
+              .filter(({ fd }) => fd === 3)
+              .map(({ bytes: value }) => new TextDecoder().decode(value)),
+            ["bootstrap-1", "bootstrap-2"],
+          );
+          assert.deepEqual(
+            receivedWrites
+              .filter(({ fd }) => fd === 4)
+              .map(({ bytes: value }) => new TextDecoder().decode(value)),
+            ["telemetry-1", "telemetry-2"],
+          );
+        }),
+      );
+
+      assert.deepEqual(received?.additionalFds, [
+        { fd: 3, direction: "input" },
+        { fd: 4, direction: "input" },
+      ]);
+    }),
+  );
+
+  it.effect("releases the registered process when input pumping is interrupted", () =>
+    Effect.gen(function* () {
+      const released = yield* Deferred.make<void>();
+      const broker: RpcProcessBroker = {
+        spawn: () =>
+          Effect.acquireRelease(
+            Effect.succeed({
+              _tag: "registered",
+              processId: "process-interrupted-input",
+              pid: ChildProcessSpawner.ProcessId(45),
+              registrationId: "registration-interrupted-input",
+              handle: makeHandle(),
+            } as const),
+            () => Deferred.succeed(released, undefined),
+          ),
+        close: () => undefined,
+        activeProcessCount: () => 1,
+      };
+      const spawner = makeBrokeredChildSpawner({ broker });
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* spawner.spawn(
+            command({
+              additionalFds: {
+                fd3: { type: "input", stream: Stream.never },
+              },
+            }),
+          );
+          yield* Effect.yieldNow;
+        }),
+      );
+
+      yield* Deferred.await(released);
     }),
   );
 

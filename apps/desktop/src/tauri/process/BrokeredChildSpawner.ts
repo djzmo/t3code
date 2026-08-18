@@ -64,11 +64,22 @@ const configuredStream = (
   throw invalid(method, "embedded stream or sink is not transport-representable");
 };
 
+interface InputFdStream {
+  readonly fd: number;
+  readonly stream: Stream.Stream<Uint8Array, PlatformError.PlatformError>;
+}
+
+interface AdditionalFdsResult {
+  readonly fds: ProcessSpawnParams["additionalFds"];
+  readonly inputStreams: ReadonlyArray<InputFdStream>;
+}
+
 const additionalFds = (
   value: Record<`fd${number}`, ChildProcess.AdditionalFdConfig> | undefined,
-): ProcessSpawnParams["additionalFds"] => {
-  if (value === undefined) return [];
-  return Object.entries(value)
+): AdditionalFdsResult => {
+  if (value === undefined) return { fds: [], inputStreams: [] };
+  const inputStreams: Array<InputFdStream> = [];
+  const fds = Object.entries(value)
     .map(([name, config]) => {
       const match = /^fd([0-9]+)$/.exec(name);
       const fd = match === null ? Number.NaN : Number(match[1]);
@@ -76,9 +87,7 @@ const additionalFds = (
         throw invalid("spawn", `additional fd '${name}' must be an integer >= 3`);
       }
       if (config.type === "input") {
-        if (config.stream !== undefined) {
-          throw invalid("spawn", `additional fd '${name}' embeds an unsupported stream`);
-        }
+        if (config.stream !== undefined) inputStreams.push({ fd, stream: config.stream });
         return { fd, direction: "input" as const };
       }
       if (config.sink !== undefined) {
@@ -87,12 +96,19 @@ const additionalFds = (
       return { fd, direction: "output" as const };
     })
     .sort((left, right) => left.fd - right.fd);
+  inputStreams.sort((left, right) => left.fd - right.fd);
+  return { fds, inputStreams };
 };
 
-const toSpawnParams = (
+interface BrokerSpawnRequest {
+  readonly params: ProcessSpawnParams;
+  readonly inputStreams: ReadonlyArray<InputFdStream>;
+}
+
+const toSpawnRequest = (
   command: ChildProcess.StandardCommand,
   options: BrokeredChildSpawnerOptions,
-): ProcessSpawnParams => {
+): BrokerSpawnRequest => {
   const commandOptions = command.options;
   if (commandOptions.shell !== undefined) {
     throw invalid("spawn", "shell execution is not supported by the process broker");
@@ -113,19 +129,23 @@ const toSpawnParams = (
     typeof options.kind === "function" ? options.kind(command) : (options.kind ?? "other");
   const attemptId = (options.makeAttemptId ?? defaultAttemptId)();
   if (attemptId.length === 0) throw invalid("spawn", "attempt id must be non-empty");
+  const configuredAdditionalFds = additionalFds(commandOptions.additionalFds);
 
   return {
-    attemptId,
-    kind,
-    command: command.command,
-    args: [...command.args],
-    ...(commandOptions.cwd === undefined ? {} : { cwd: commandOptions.cwd }),
-    env,
-    extendEnv: commandOptions.extendEnv === true,
-    stdin: pipeMode(stdin, "stdin"),
-    stdout: pipeMode(stdout, "stdout"),
-    stderr: pipeMode(stderr, "stderr"),
-    additionalFds: additionalFds(commandOptions.additionalFds),
+    params: {
+      attemptId,
+      kind,
+      command: command.command,
+      args: [...command.args],
+      ...(commandOptions.cwd === undefined ? {} : { cwd: commandOptions.cwd }),
+      env,
+      extendEnv: commandOptions.extendEnv === true,
+      stdin: pipeMode(stdin, "stdin"),
+      stdout: pipeMode(stdout, "stdout"),
+      stderr: pipeMode(stderr, "stderr"),
+      additionalFds: configuredAdditionalFds.fds,
+    },
+    inputStreams: configuredAdditionalFds.inputStreams,
   };
 };
 
@@ -175,15 +195,25 @@ export const makeBrokeredChildSpawner = (
       );
     }
     return Effect.gen(function* () {
-      const params = toSpawnParams(command, options);
+      const request = toSpawnRequest(command, options);
       const result = yield* options.broker
-        .spawn(params)
+        .spawn(request.params)
         .pipe(
           Effect.mapError((error) =>
             error instanceof PlatformError.PlatformError ? error : invalid("spawn", error.message),
           ),
         );
-      return result._tag === "registered" ? result.handle : yield* fastExitHandle(result);
+      if (result._tag === "fast-exit") return yield* fastExitHandle(result);
+
+      // Match the native Effect spawner: input streams are started only after
+      // the child handle exists, and each pump is tied to the caller's scope.
+      yield* Effect.forEach(
+        request.inputStreams,
+        ({ fd, stream }) =>
+          Stream.run(stream, result.handle.getInputFd(fd)).pipe(Effect.forkScoped),
+        { discard: true },
+      );
+      return result.handle;
     });
   };
   return ChildProcessSpawner.make(spawn);

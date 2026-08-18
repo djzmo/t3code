@@ -1,7 +1,11 @@
 import { assert, describe, it } from "@effect/vitest";
 
 import type * as TauriApp from "./electron/TauriApp.ts";
-import { identityFromHello } from "./host-entry.ts";
+import {
+  createHostTransportCloseHandler,
+  HOST_HARD_EXIT_TIMEOUT_MS,
+  identityFromHello,
+} from "./host-entry.ts";
 
 const hello = {
   appName: "Agent Nanoni",
@@ -49,5 +53,28 @@ describe("Tauri host entry", () => {
       identityFromHello({ ...hello, isDev: false, version: "1.2.3" }).branding.stageLabel,
       "Alpha",
     );
+  });
+
+  it("starts one normal shutdown and arms the five-second hard-exit barrier", () => {
+    const events: string[] = [];
+    let deadline: (() => void) | undefined;
+    const onClose = createHostTransportCloseHandler({
+      closeBroker: (cause) => events.push(`broker:${String(cause)}`),
+      requestShutdown: () => events.push("shutdown"),
+      hardExit: (code) => events.push(`exit:${code}`),
+      scheduleHardExit: (callback, delayMs) => {
+        assert.equal(delayMs, HOST_HARD_EXIT_TIMEOUT_MS);
+        deadline = callback;
+        events.push("deadline");
+        return { unref: () => events.push("unref") };
+      },
+    });
+
+    onClose("shell-eof");
+    onClose("duplicate");
+    assert.deepEqual(events, ["broker:shell-eof", "deadline", "unref", "shutdown"]);
+    assert.isDefined(deadline);
+    deadline();
+    assert.deepEqual(events, ["broker:shell-eof", "deadline", "unref", "shutdown", "exit:1"]);
   });
 });
