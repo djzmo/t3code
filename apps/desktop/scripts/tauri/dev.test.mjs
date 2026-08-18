@@ -8,6 +8,7 @@ import {
   findClerkConfiguration,
   normalizeWorktreePath,
   resolveDevelopmentCommands,
+  resolveHostEnvironment,
   resolveDevelopmentIdentifier,
   resolveCanonicalWorktreePath,
   terminateChild,
@@ -70,6 +71,12 @@ describe("Tauri development launcher", () => {
       extraArgs: ["--debug"],
     });
 
+    assert.deepEqual(commands.host.args, [
+      "--filter",
+      "@t3tools/desktop",
+      "run",
+      "build:tauri-host",
+    ]);
     assert.deepEqual(commands.web.args, DEV_WEB_GRAPH_ARGS);
     assert.deepEqual(commands.tauri.args, [
       "--filter",
@@ -81,6 +88,20 @@ describe("Tauri development launcher", () => {
       "C:/temp/tauri.dev.conf.json",
       "--debug",
     ]);
+  });
+
+  it("pins the development sidecar to this Node runtime and host bundle", () => {
+    assert.deepEqual(
+      resolveHostEnvironment(
+        { KEEP: "yes", AGENT_NANONI_NODE: "untrusted" },
+        { nodeExecutable: "C:/node.exe", hostEntry: "C:/host.cjs" },
+      ),
+      {
+        KEEP: "yes",
+        AGENT_NANONI_NODE: "C:/node.exe",
+        AGENT_NANONI_HOST_ENTRY: "C:/host.cjs",
+      },
+    );
   });
 
   it("detaches Unix children so shutdown can address their process groups", () => {

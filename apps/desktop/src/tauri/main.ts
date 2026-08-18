@@ -63,9 +63,11 @@ import * as TauriPreReadyPlatform from "./app/TauriPreReadyPlatform.ts";
 import * as TauriSshCliRunner from "./app/TauriSshCliRunner.ts";
 import * as TauriWslServerTree from "./wsl/TauriWslServerTree.ts";
 import * as TauriIpcMain from "./ipc/TauriIpcMain.ts";
-import type * as DesktopIpc from "../ipc/DesktopIpc.ts";
 import * as TauriPreview from "./preview/TauriPreviewManagerStub.ts";
 import * as ManagedChildSpawner from "./process/ManagedChildSpawner.ts";
+import { createBootSnapshot } from "./bridge/bootSnapshot.ts";
+import { createNanoniInitScript } from "./bridge/shim/initScript.ts";
+import * as IpcChannels from "../ipc/channels.ts";
 
 const nodeSupportLayer = Layer.mergeAll(
   NodeFileSystem.layer,
@@ -81,8 +83,8 @@ export interface TauriHostPorts {
   readonly dialog: TauriDialog.TauriDialogPort;
   readonly shell: TauriShell.TauriShellPort;
   readonly window: TauriWindow.TauriWindowPort;
-  readonly registry: ManagedChildSpawner.ManagedChildRegistry;
-  readonly ipcMain?: DesktopIpc.DesktopIpcMain;
+  readonly registry?: ManagedChildSpawner.ManagedChildRegistry;
+  readonly ipcMain?: TauriIpcMain.TauriIpcMain;
 }
 
 export interface TauriHostEnvironmentOptions {
@@ -97,7 +99,49 @@ export interface TauriHostOptions extends TauriHostEnvironmentOptions {
   readonly ports: TauriHostPorts;
   readonly nodeEngineRange?: string;
   readonly protocolVersion?: string;
+  readonly shellHello?: TauriApp.TauriShellHelloResult;
+  readonly childSpawner?: ChildProcessSpawner.ChildProcessSpawner["Service"];
 }
+
+const createRendererInitScripts = (options: TauriHostOptions): ReadonlyArray<string> => {
+  const ipcMain = options.ports.ipcMain;
+  if (ipcMain === undefined) return [];
+  type RendererSync = Parameters<typeof createNanoniInitScript>[0]["sync"];
+  const rawBranding = ipcMain.invokeSync(IpcChannels.GET_APP_BRANDING_CHANNEL);
+  const rawLocale = ipcMain.invokeSync(IpcChannels.GET_SYSTEM_LOCALE_CHANNEL);
+  const rawBootstraps = ipcMain.invokeSync(IpcChannels.GET_LOCAL_ENVIRONMENT_BOOTSTRAPS_CHANNEL);
+  // These values are written by the matching typed DesktopIpc listeners in
+  // this process; this is the single sync bridge boundary before serialization.
+  const appBranding =
+    typeof rawBranding === "object" ? (rawBranding as RendererSync["appBranding"]) : null;
+  const systemLocale = typeof rawLocale === "string" ? rawLocale : null;
+  const localEnvironmentBootstraps = Array.isArray(rawBootstraps)
+    ? (rawBootstraps as unknown as RendererSync["localEnvironmentBootstraps"])
+    : [];
+  const windowFullscreenState =
+    ipcMain.invokeSync(IpcChannels.GET_WINDOW_FULLSCREEN_STATE_CHANNEL) === true;
+  const boot = createBootSnapshot({
+    isDevelopment: options.shellHello?.isDev ?? true,
+    ...(options.shellHello === undefined ? {} : { shellHelloVersion: options.shellHello.version }),
+    base: {
+      branding: appBranding,
+      locale: systemLocale,
+      bootstraps: localEnvironmentBootstraps,
+      fullscreen: windowFullscreenState,
+    },
+  });
+  return [
+    createNanoniInitScript({
+      boot,
+      sync: {
+        appBranding,
+        systemLocale,
+        localEnvironmentBootstraps,
+        windowFullscreenState,
+      },
+    }),
+  ];
+};
 
 const resolveSshRunner = (
   environment: DesktopEnvironment.DesktopEnvironment["Service"],
@@ -130,16 +174,26 @@ const makeEnvironmentLayer = (
     }),
   ).pipe(Layer.provide(appLayer), Layer.provideMerge(nodeSupportLayer));
 
-const makeManagedChildSpawnerLayer = (registry: ManagedChildSpawner.ManagedChildRegistry) =>
-  Layer.unwrap(
+const makeChildSpawnerLayer = (options: TauriHostOptions) => {
+  if (options.childSpawner !== undefined) {
+    return Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, options.childSpawner);
+  }
+  const registry = options.ports.registry;
+  if (registry === undefined) {
+    throw new Error("Tauri host requires a native broker child spawner or fallback registry.");
+  }
+  return Layer.unwrap(
     Effect.gen(function* () {
       const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
       return Layer.succeed(
         ChildProcessSpawner.ChildProcessSpawner,
-        ManagedChildSpawner.decorateManagedChildSpawner(delegate, { registry }),
+        ManagedChildSpawner.decorateManagedChildSpawner(delegate, {
+          registry,
+        }),
       );
     }),
   ).pipe(Layer.provide(nodeServicesLayer));
+};
 
 export const makeDesktopRuntimeLayer = (options: TauriHostOptions) => {
   const tauriAppLayer =
@@ -157,7 +211,9 @@ export const makeDesktopRuntimeLayer = (options: TauriHostOptions) => {
     TauriShell.layer(options.ports.shell),
     TauriTheme.layer,
     TauriUpdater.layer,
-    TauriWindow.layer(options.ports.window),
+    TauriWindow.layer(options.ports.window, {
+      initScripts: () => createRendererInitScripts(options),
+    }),
     TauriIpcMain.layer(options.ports.ipcMain),
   );
 
@@ -223,7 +279,7 @@ export const makeDesktopRuntimeLayer = (options: TauriHostOptions) => {
     Layer.provideMerge(NodeHttpClient.layerUndici),
     Layer.provideMerge(NetService.layer),
     Layer.provideMerge(tauriElectronLayer),
-    Layer.provideMerge(makeManagedChildSpawnerLayer(options.ports.registry)),
+    Layer.provideMerge(makeChildSpawnerLayer(options)),
   );
 
   return runtimeLayer;

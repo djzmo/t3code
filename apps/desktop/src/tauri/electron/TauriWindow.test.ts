@@ -58,6 +58,27 @@ const captureUnsupportedMember = (window: object): unknown => {
 };
 
 describe("TauriWindow", () => {
+  it.effect("generates init scripts at the native creation boundary", () =>
+    Effect.gen(function* () {
+      const fake = makePort();
+      let generationCount = 0;
+      const service = TauriWindow.make(fake.port, {
+        initScripts: () => {
+          generationCount += 1;
+          return [`window.__generation = ${String(generationCount)}`];
+        },
+      });
+
+      yield* service.create({ title: "One", width: 100, height: 100, webPreferences: {} });
+      yield* service.create({ title: "Two", width: 100, height: 100, webPreferences: {} });
+
+      assert.deepEqual(
+        fake.created.map(({ initScripts }) => initScripts),
+        [["window.__generation = 1"], ["window.__generation = 2"]],
+      );
+    }),
+  );
+
   it.effect("creates a guarded facade and forwards supported window operations", () =>
     Effect.gen(function* () {
       const fake = makePort();

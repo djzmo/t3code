@@ -616,6 +616,8 @@ export const ElectronWindow = Context.Service<
 
 export interface TauriWindowOptions {
   readonly initialLabel?: string;
+  /** Generated immediately before native window creation and first evaluation. */
+  readonly initScripts?: () => ReadonlyArray<string>;
 }
 
 type MadeTauriWindowService = {
@@ -652,7 +654,10 @@ const makeWithDisposer = (
 
   const create = (browserOptions: Electron.BrowserWindowConstructorOptions) => {
     const requestedLabel = labelForNextWindow();
-    const params = toCreateParams(browserOptions, requestedLabel);
+    const params = {
+      ...toCreateParams(browserOptions, requestedLabel),
+      initScripts: [...(options.initScripts?.() ?? [])],
+    };
     return Effect.tryPromise({
       try: async () => {
         const result = await port.create(params);

@@ -108,6 +108,10 @@ export function createSpawnOptions({ cwd, env, platform = process.platform }) {
 
 export function resolveDevelopmentCommands({ overlayPath, extraArgs = [] }) {
   return {
+    host: {
+      command: executable("pnpm"),
+      args: ["--filter", "@t3tools/desktop", "run", "build:tauri-host"],
+    },
     web: {
       command: executable("vp"),
       args: [...DEV_WEB_GRAPH_ARGS],
@@ -125,6 +129,20 @@ export function resolveDevelopmentCommands({ overlayPath, extraArgs = [] }) {
         ...extraArgs,
       ],
     },
+  };
+}
+
+export function resolveHostEnvironment(
+  environment,
+  {
+    nodeExecutable = process.execPath,
+    hostEntry = NodePath.join(desktopDirectory, "dist-tauri-host", "host.cjs"),
+  } = {},
+) {
+  return {
+    ...environment,
+    AGENT_NANONI_NODE: nodeExecutable,
+    AGENT_NANONI_HOST_ENTRY: hostEntry,
   };
 }
 
@@ -187,7 +205,7 @@ function waitForExit(child) {
 }
 
 async function run() {
-  const environment = { ...process.env };
+  const environment = resolveHostEnvironment(process.env);
   assertClerkAbsent(environment);
 
   const canonicalPath = resolveCanonicalWorktreePath();
@@ -205,6 +223,13 @@ async function run() {
     extraArgs: process.argv.slice(2),
   });
   const spawnOptions = createSpawnOptions({ cwd: repositoryRoot, env: environment });
+  const hostBuild = NodeChildProcess.spawn(commands.host.command, commands.host.args, spawnOptions);
+  const hostBuildExit = await waitForExit(hostBuild);
+  if (hostBuildExit !== 0) {
+    NodeFS.rmSync(overlayDirectory, { recursive: true, force: true });
+    process.exitCode = hostBuildExit;
+    return;
+  }
   const web = NodeChildProcess.spawn(commands.web.command, commands.web.args, spawnOptions);
   const tauri = NodeChildProcess.spawn(commands.tauri.command, commands.tauri.args, {
     ...spawnOptions,

@@ -22,7 +22,7 @@ export const TAURI_HOST_ALIASES = [
 ] as const;
 
 export const TAURI_HOST_BUILD = {
-  entry: "src/tauri/main.ts",
+  entry: "src/tauri/host-entry.ts",
   outDir: "dist-tauri-host",
   fileName: "host.cjs",
 } as const;
