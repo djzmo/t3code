@@ -331,10 +331,10 @@ impl SidecarSupervisor {
         let mut guard = self.shared.state.lock().map_err(|_| SidecarError::Closed)?;
         let state = guard.as_mut().ok_or(SidecarError::Closed)?;
         for event in state.peer.cancel_request(id).map_err(peer_error)? {
-            if let PeerEvent::RequestCancelled(cancelled) = &event {
-                if let Some(waiter) = state.waiters.remove(cancelled) {
-                    waiter.complete(Err(SidecarError::Timeout));
-                }
+            if let PeerEvent::RequestCancelled(cancelled) = &event
+                && let Some(waiter) = state.waiters.remove(cancelled)
+            {
+                waiter.complete(Err(SidecarError::Timeout));
             }
             write_event(state, event)?;
         }
@@ -470,10 +470,10 @@ fn dispatch_events(shared: &Arc<Shared>, events: Vec<PeerEvent>) -> Result<(), S
             }
             PeerEvent::RequestCancelled(id) => {
                 let mut guard = shared.state.lock().map_err(|_| SidecarError::Closed)?;
-                if let Some(state) = guard.as_mut() {
-                    if let Some(waiter) = state.waiters.remove(&id) {
-                        waiter.complete(Err(SidecarError::Timeout));
-                    }
+                if let Some(state) = guard.as_mut()
+                    && let Some(waiter) = state.waiters.remove(&id)
+                {
+                    waiter.complete(Err(SidecarError::Timeout));
                 }
             }
             PeerEvent::UnknownResponse(_) | PeerEvent::Resynchronized(_) => {}
@@ -529,10 +529,10 @@ fn dispatch_incoming(shared: &Arc<Shared>, envelope: RpcEnvelope) -> Result<(), 
             write_result?;
         }
         RpcEnvelope::Notification(notification) => {
-            if notification.method == RpcMethod::IpcPush {
-                if let Some(RpcParams::IpcPush(params)) = notification.params.as_ref() {
-                    (shared.handlers.ipc_push)(params.clone());
-                }
+            if notification.method == RpcMethod::IpcPush
+                && let Some(RpcParams::IpcPush(params)) = notification.params.as_ref()
+            {
+                (shared.handlers.ipc_push)(params.clone());
             }
             (shared.handlers.notification)(notification);
         }
@@ -602,13 +602,13 @@ fn close_shared(
     for waiter in pending {
         waiter.complete(Err(SidecarError::Peer(format!("{reason:?}"))));
     }
-    if let Ok(mut child_guard) = shared.child.lock() {
-        if let Some(mut child) = child_guard.take() {
-            if terminate_child {
-                terminate_retained_child(&mut child);
-            }
-            let _ = child.wait();
+    if let Ok(mut child_guard) = shared.child.lock()
+        && let Some(mut child) = child_guard.take()
+    {
+        if terminate_child {
+            terminate_retained_child(&mut child);
         }
+        let _ = child.wait();
     }
     if !matches!(reason, PeerCloseReason::Local(_)) {
         (shared.handlers.unexpected_close)(reason);

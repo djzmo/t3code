@@ -488,7 +488,7 @@ fn decode_base64(value: &str) -> Result<Vec<u8>, RpcAdapterError> {
         return Ok(Vec::new());
     }
     let bytes = value.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(RpcAdapterError::InvalidBase64);
     }
     let mut output = Vec::with_capacity(bytes.len() / 4 * 3);

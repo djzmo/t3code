@@ -48,6 +48,9 @@ jobs:
           apps/desktop/src/tauri/__tests__/host.integration.test.ts
           apps/desktop/src/tauri/__tests__/updater-lifecycle.integration.test.ts
           apps/desktop/src/tauri/process/BrokeredChildSpawner.test.ts
+          apps/desktop/scripts/tauri/bench/topology-a.test.mjs
+          apps/desktop/scripts/tauri/bench/topology-a-runner.test.mjs
+          apps/desktop/scripts/tauri/dev.test.mjs
           apps/desktop/scripts/tauri/smoke-test.test.mjs
           scripts/build-tauri-artifact.test.ts
           scripts/lib/tauri-payload-validation.test.ts
@@ -99,6 +102,25 @@ jobs:
 
       - name: Run locked protocol tests
         run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+
+      - name: Verify normal graph excludes Pilot and Tauri unstable
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          feature_tree="$(cargo tree --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features -e features)"
+          if grep -E 'tauri-plugin-pilot|tauri feature "unstable"' <<<"$feature_tree"; then
+            echo "ordinary builds must exclude Pilot and Tauri unstable" >&2
+            exit 1
+          fi
+
+      - name: Check benchmark-only Pilot integration
+        env:
+          TAURI_CONFIG: '{"app":{"security":{"capabilities":["main",{"identifier":"topology-a-pilot","description":"Debug-only permission for the Phase 0 Topology A benchmark.","webviews":["main"],"permissions":["pilot:default"]}]}}}'
+        run: >-
+          cargo check --locked
+          --manifest-path apps/desktop/src-tauri/Cargo.toml
+          --features topology-a-pilot
+          --bin agent-nanoni-desktop
 
       - name: Check Rust formatting
         run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check

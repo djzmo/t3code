@@ -1086,10 +1086,10 @@ fn setup_sidecar<R: tauri::Runtime>(
             }),
         }),
         notification: Arc::new(move |notification: RpcNotification| {
-            if let Ok(mut dispatcher) = notification_dispatcher.lock() {
-                if let Err(error) = dispatcher.notification(notification) {
-                    eprintln!("native shell notification failed: {}", error.message);
-                }
+            if let Ok(mut dispatcher) = notification_dispatcher.lock()
+                && let Err(error) = dispatcher.notification(notification)
+            {
+                eprintln!("native shell notification failed: {}", error.message);
             }
         }),
         ipc_push: Arc::new(move |params: IpcInvokeParams| {
