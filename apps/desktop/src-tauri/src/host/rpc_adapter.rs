@@ -4,6 +4,7 @@
 //! process and registration identifiers and keeps the opaque native tokens in
 //! private maps.
 
+use super::broker::{AdditionalFdDirection, AdditionalFdSpec};
 use super::{
     BrokerError, BrokerEvent, ProcessBroker, ProcessKind as NativeProcessKind, RegistrationToken,
     ReleaseOutcome, SpawnRequest, StdinOutcome,
@@ -17,6 +18,7 @@ use crate::rpc::protocol::{
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -52,10 +54,13 @@ struct ProcessRecord {
     broker_registration: Option<RegistrationToken>,
 }
 
-/// Shell-side process DTO adapter.
-#[derive(Debug)]
-pub struct RpcProcessBroker {
-    broker: ProcessBroker,
+/// Mutable wire-token state shared by the request adapter and event receiver.
+///
+/// The native broker's event queue already provides the blocking primitive.
+/// Keeping only the token maps behind a small mutex lets an event receiver
+/// wait on that queue without retaining the shell dispatcher/platform lock.
+#[derive(Debug, Default)]
+struct ProcessState {
     attempts: HashMap<String, String>,
     processes: HashMap<String, ProcessRecord>,
     registrations: HashMap<String, String>,
@@ -63,16 +68,73 @@ pub struct RpcProcessBroker {
     next_registration_id: u64,
 }
 
+impl ProcessState {
+    fn allocate_process_id(&mut self) -> String {
+        let id = format!("process-{}", self.next_process_id);
+        self.next_process_id = self.next_process_id.saturating_add(1);
+        id
+    }
+
+    fn allocate_registration_id(&mut self, token: RegistrationToken) -> String {
+        let id = format!("registration-{}", self.next_registration_id);
+        self.next_registration_id = self.next_registration_id.saturating_add(1);
+        let _ = token;
+        id
+    }
+}
+
+/// A blocking, thread-safe view of native broker events.
+///
+/// The receiver owns a clone of the broker's bounded event stream and shares
+/// only the process-token state with [`RpcProcessBroker`]. Calling [`next`]
+/// therefore blocks without holding the dispatcher or platform mutex.
+#[derive(Debug, Clone)]
+pub struct RpcBrokerEventReceiver {
+    events: super::broker::EventStream,
+    state: Arc<Mutex<ProcessState>>,
+}
+
+impl RpcBrokerEventReceiver {
+    /// Blocks until an event is available or the broker transport is closed.
+    pub fn next(&self) -> Option<Result<RpcNotification, RpcAdapterError>> {
+        let event = self.events.next()?;
+        Some(self.map_event(event))
+    }
+
+    /// Returns one queued event without waiting.
+    pub fn try_next(&self) -> Option<Result<RpcNotification, RpcAdapterError>> {
+        let event = self.events.try_next()?;
+        Some(self.map_event(event))
+    }
+
+    /// Closes the shared event stream and wakes blocked receivers/producers.
+    pub fn close(&self) {
+        self.events.close();
+    }
+
+    fn map_event(&self, event: BrokerEvent) -> Result<RpcNotification, RpcAdapterError> {
+        let mut state = lock_state(&self.state);
+        event_to_notification(&mut state, event)
+    }
+}
+
+/// Shell-side process DTO adapter.
+#[derive(Debug)]
+pub struct RpcProcessBroker {
+    broker: ProcessBroker,
+    state: Arc<Mutex<ProcessState>>,
+}
+
 impl RpcProcessBroker {
     #[must_use]
     pub fn new(broker: ProcessBroker) -> Self {
         Self {
             broker,
-            attempts: HashMap::new(),
-            processes: HashMap::new(),
-            registrations: HashMap::new(),
-            next_process_id: 1,
-            next_registration_id: 1,
+            state: Arc::new(Mutex::new(ProcessState {
+                next_process_id: 1,
+                next_registration_id: 1,
+                ..ProcessState::default()
+            })),
         }
     }
 
@@ -81,22 +143,36 @@ impl RpcProcessBroker {
         &self.broker
     }
 
+    /// Subscribes to the broker's bounded event queue without borrowing the
+    /// adapter or its shell/platform dispatcher.
+    #[must_use]
+    pub fn subscribe_events(&self) -> RpcBrokerEventReceiver {
+        RpcBrokerEventReceiver {
+            events: self.broker.events(),
+            state: Arc::clone(&self.state),
+        }
+    }
+
     pub fn spawn(
         &mut self,
         params: ProcessSpawnParams,
     ) -> Result<ProcessSpawnResult, RpcAdapterError> {
         let request = spawn_request(&params)?;
-        if self.attempts.contains_key(&params.attempt_id) {
+        // Hold the mapping state through broker registration. A fast child can
+        // emit its exit event before `spawn` returns; the receiver may pop it
+        // immediately, so its mapping must be visible before this lock drops.
+        let mut state = lock_state(&self.state);
+        if state.attempts.contains_key(&params.attempt_id) {
             return Err(RpcAdapterError::InvalidRequest(
                 "attemptId is already in flight".to_owned(),
             ));
         }
         let spawned = self.broker.spawn(request)?;
-        let process_id = self.allocate_process_id();
         let registered = self.broker.register(spawned.attempt_id)?;
+        let process_id = state.allocate_process_id();
         let registration_id = registered
             .registration_id
-            .map(|token| self.allocate_registration_id(token));
+            .map(|token| state.allocate_registration_id(token));
         let record = ProcessRecord {
             attempt_id: params.attempt_id.clone(),
             process_id: process_id.clone(),
@@ -104,13 +180,15 @@ impl RpcProcessBroker {
             broker_attempt: spawned.attempt_id,
             broker_registration: registered.registration_id,
         };
-        self.attempts
+        state
+            .attempts
             .insert(params.attempt_id.clone(), process_id.clone());
         if let Some(registration_id) = &registration_id {
-            self.registrations
+            state
+                .registrations
                 .insert(registration_id.clone(), process_id.clone());
         }
-        self.processes.insert(process_id.clone(), record);
+        state.processes.insert(process_id.clone(), record);
         Ok(ProcessSpawnResult {
             process_id,
             pid: u64::from(spawned.pid),
@@ -122,17 +200,18 @@ impl RpcProcessBroker {
         &mut self,
         params: ProcessRegisterParams,
     ) -> Result<RegistrationResult, RpcAdapterError> {
-        let process_id = self
+        let mut state = lock_state(&self.state);
+        let process_id = state
             .attempts
             .get(&params.attempt_id)
             .cloned()
             .ok_or_else(|| RpcAdapterError::UnknownAttempt(params.attempt_id.clone()))?;
-        let broker_attempt_id = self
+        let broker_attempt_id = state
             .processes
             .get(&process_id)
             .ok_or_else(|| RpcAdapterError::UnknownProcess(process_id.clone()))?
             .broker_attempt;
-        if let Some(registration_id) = self
+        if let Some(registration_id) = state
             .processes
             .get(&process_id)
             .and_then(|record| record.registration_id.as_ref())
@@ -144,15 +223,16 @@ impl RpcProcessBroker {
         let outcome = self.broker.register(broker_attempt_id)?;
         let registration_id = outcome
             .registration_id
-            .map(|token| self.allocate_registration_id(token));
-        let record = self
+            .map(|token| state.allocate_registration_id(token));
+        let record = state
             .processes
             .get_mut(&process_id)
             .ok_or_else(|| RpcAdapterError::UnknownProcess(process_id.clone()))?;
         record.registration_id = registration_id.clone();
         record.broker_registration = outcome.registration_id;
         if let Some(registration_id) = &registration_id {
-            self.registrations
+            state
+                .registrations
                 .insert(registration_id.clone(), process_id);
         }
         Ok(RegistrationResult {
@@ -161,21 +241,16 @@ impl RpcProcessBroker {
     }
 
     pub fn input(&self, params: ProcessInputParams) -> Result<StdinOutcome, RpcAdapterError> {
-        if params.fd != 0 {
-            return Err(RpcAdapterError::InvalidRequest(
-                "process.input only supports fd 0".to_owned(),
-            ));
-        }
         let record = self.process_record(&params.process_id, &params.registration_id)?;
         let bytes = decode_base64(&params.bytes_base64)?;
         match record.broker_registration {
             Some(registration) => self
                 .broker
-                .write_stdin(registration, &bytes)
+                .write_input(registration, params.fd, &bytes)
                 .map_err(RpcAdapterError::from),
             None => self
                 .broker
-                .write_stdin(record.broker_attempt, &bytes)
+                .write_input(record.broker_attempt, params.fd, &bytes)
                 .map_err(RpcAdapterError::from),
         }
     }
@@ -213,12 +288,13 @@ impl RpcProcessBroker {
         &mut self,
         params: crate::rpc::protocol::ProcessCancelParams,
     ) -> Result<ReleaseOutcome, RpcAdapterError> {
-        let process_id = self
+        let state = lock_state(&self.state);
+        let process_id = state
             .attempts
             .get(&params.attempt_id)
             .cloned()
             .ok_or_else(|| RpcAdapterError::UnknownAttempt(params.attempt_id.clone()))?;
-        let record = self
+        let record = state
             .processes
             .get(&process_id)
             .cloned()
@@ -230,93 +306,29 @@ impl RpcProcessBroker {
 
     /// Converts the next native event into a shell-to-host notification.
     pub fn next_event(&mut self) -> Option<Result<RpcNotification, RpcAdapterError>> {
-        let event = self.broker.events().next()?;
-        Some(self.event_to_notification(event))
+        self.subscribe_events().next()
     }
 
     /// Converts one already-queued native event without blocking the caller.
     pub fn try_next_event(&mut self) -> Option<Result<RpcNotification, RpcAdapterError>> {
-        let event = self.broker.events().try_next()?;
-        Some(self.event_to_notification(event))
+        self.subscribe_events().try_next()
     }
 
     pub fn transport_close(&mut self) {
         let _ = self.broker.transport_close();
-        self.attempts.clear();
-        self.processes.clear();
-        self.registrations.clear();
-    }
-
-    fn event_to_notification(
-        &mut self,
-        event: BrokerEvent,
-    ) -> Result<RpcNotification, RpcAdapterError> {
-        let (attempt, registration) = match &event {
-            BrokerEvent::Output {
-                attempt_id,
-                registration_id,
-                ..
-            }
-            | BrokerEvent::Exit {
-                attempt_id,
-                registration_id,
-                ..
-            } => (*attempt_id, *registration_id),
-        };
-        let record = self
-            .processes
-            .values()
-            .find(|record| {
-                record.broker_attempt == attempt
-                    && (registration.is_none() || record.broker_registration == registration)
-            })
-            .cloned()
-            .ok_or_else(|| RpcAdapterError::UnknownAttempt(attempt.to_string()))?;
-        match event {
-            BrokerEvent::Output {
-                stream,
-                sequence,
-                bytes,
-                ..
-            } => Ok(RpcNotification {
-                jsonrpc: crate::rpc::protocol::JsonRpcVersion::V2,
-                method: RpcMethod::ProcessOutput,
-                params: Some(RpcParams::ProcessOutput(ProcessOutputParams {
-                    process_id: record.process_id,
-                    fd: if matches!(stream, super::OutputStream::Stdout) {
-                        1
-                    } else {
-                        2
-                    },
-                    sequence,
-                    bytes_base64: encode_base64(&bytes),
-                })),
-            }),
-            BrokerEvent::Exit { status, .. } => {
-                self.attempts.remove(&record.attempt_id);
-                if let Some(registration_id) = &record.registration_id {
-                    self.registrations.remove(registration_id);
-                }
-                self.processes.remove(&record.process_id);
-                Ok(RpcNotification {
-                    jsonrpc: crate::rpc::protocol::JsonRpcVersion::V2,
-                    method: RpcMethod::ProcessExit,
-                    params: Some(RpcParams::ProcessExit(ProcessExitParams {
-                        process_id: record.process_id,
-                        code: RequiredNullable(status.code.map(i64::from)),
-                        signal: status.signal.map(|signal| signal.to_string()),
-                    })),
-                })
-            }
-        }
+        let mut state = lock_state(&self.state);
+        state.attempts.clear();
+        state.processes.clear();
+        state.registrations.clear();
     }
 
     fn process_record(
         &self,
         process_id: &str,
         registration_id: &str,
-    ) -> Result<&ProcessRecord, RpcAdapterError> {
-        let record = self
+    ) -> Result<ProcessRecord, RpcAdapterError> {
+        let state = lock_state(&self.state);
+        let record = state
             .processes
             .get(process_id)
             .ok_or_else(|| RpcAdapterError::UnknownProcess(process_id.to_owned()))?;
@@ -325,20 +337,78 @@ impl RpcProcessBroker {
                 registration_id.to_owned(),
             ));
         }
-        Ok(record)
+        Ok(record.clone())
     }
+}
 
-    fn allocate_process_id(&mut self) -> String {
-        let id = format!("process-{}", self.next_process_id);
-        self.next_process_id = self.next_process_id.saturating_add(1);
-        id
+fn lock_state(state: &Mutex<ProcessState>) -> MutexGuard<'_, ProcessState> {
+    match state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     }
+}
 
-    fn allocate_registration_id(&mut self, token: RegistrationToken) -> String {
-        let id = format!("registration-{}", self.next_registration_id);
-        self.next_registration_id = self.next_registration_id.saturating_add(1);
-        let _ = token;
-        id
+fn event_to_notification(
+    state: &mut ProcessState,
+    event: BrokerEvent,
+) -> Result<RpcNotification, RpcAdapterError> {
+    let (attempt, registration) = match &event {
+        BrokerEvent::Output {
+            attempt_id,
+            registration_id,
+            ..
+        }
+        | BrokerEvent::Exit {
+            attempt_id,
+            registration_id,
+            ..
+        } => (*attempt_id, *registration_id),
+    };
+    let record = state
+        .processes
+        .values()
+        .find(|record| {
+            record.broker_attempt == attempt
+                && (registration.is_none() || record.broker_registration == registration)
+        })
+        .cloned()
+        .ok_or_else(|| RpcAdapterError::UnknownAttempt(attempt.to_string()))?;
+    match event {
+        BrokerEvent::Output {
+            stream,
+            sequence,
+            bytes,
+            ..
+        } => Ok(RpcNotification {
+            jsonrpc: crate::rpc::protocol::JsonRpcVersion::V2,
+            method: RpcMethod::ProcessOutput,
+            params: Some(RpcParams::ProcessOutput(ProcessOutputParams {
+                process_id: record.process_id,
+                fd: match stream {
+                    super::OutputStream::Stdout => 1,
+                    super::OutputStream::Stderr => 2,
+                    super::OutputStream::Additional(fd) => fd,
+                },
+                sequence,
+                bytes_base64: encode_base64(&bytes),
+            })),
+        }),
+        BrokerEvent::Exit { status, .. } => {
+            state.attempts.remove(&record.attempt_id);
+            if let Some(registration_id) = &record.registration_id {
+                state.registrations.remove(registration_id);
+            }
+            state.processes.remove(&record.process_id);
+            Ok(RpcNotification {
+                jsonrpc: crate::rpc::protocol::JsonRpcVersion::V2,
+                method: RpcMethod::ProcessExit,
+                params: Some(RpcParams::ProcessExit(ProcessExitParams {
+                    process_id: record.process_id,
+                    code: RequiredNullable(status.code.map(i64::from)),
+                    signal: status.signal.map(|signal| signal.to_string()),
+                })),
+            })
+        }
     }
 }
 
@@ -359,13 +429,21 @@ fn spawn_request(params: &ProcessSpawnParams) -> Result<SpawnRequest, RpcAdapter
             )));
         }
     }
-    if params.additional_fds.iter().any(|fd| {
-        fd.direction == ProcessFdDirection::Input || fd.direction == ProcessFdDirection::Output
-    }) {
-        return Err(RpcAdapterError::InvalidRequest(
-            "additional file descriptors are unsupported by the native broker".to_owned(),
-        ));
+    let mut additional_fds = Vec::with_capacity(params.additional_fds.len());
+    for descriptor in &params.additional_fds {
+        let direction = match descriptor.direction {
+            ProcessFdDirection::Input => AdditionalFdDirection::Input,
+            ProcessFdDirection::Output => AdditionalFdDirection::Output,
+        };
+        additional_fds.push(AdditionalFdSpec {
+            fd: descriptor.fd,
+            direction,
+        });
     }
+    super::broker::validate_additional_fds(&additional_fds).map_err(|error| match error {
+        BrokerError::InvalidRequest(message) => RpcAdapterError::InvalidRequest(message),
+        other => RpcAdapterError::Broker(other.to_string()),
+    })?;
     let kind = match &params.kind {
         ProcessKind::Server => NativeProcessKind::Server,
         ProcessKind::Ssh => NativeProcessKind::Ssh,
@@ -382,6 +460,7 @@ fn spawn_request(params: &ProcessSpawnParams) -> Result<SpawnRequest, RpcAdapter
         .iter()
         .map(|(key, value)| (OsString::from(key), OsString::from(value)))
         .collect();
+    request.additional_fds = additional_fds;
     Ok(request)
 }
 
@@ -461,6 +540,9 @@ mod tests {
     use crate::host::BrokerConfig;
     use crate::rpc::protocol::ProcessAdditionalFd;
     use std::collections::BTreeMap;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     fn params(command: &str, args: &[&str]) -> ProcessSpawnParams {
         ProcessSpawnParams {
@@ -478,6 +560,17 @@ mod tests {
         }
     }
 
+    fn long_running_params() -> ProcessSpawnParams {
+        #[cfg(windows)]
+        {
+            params("ping", &["127.0.0.1", "-n", "60"])
+        }
+        #[cfg(not(windows))]
+        {
+            params("sleep", &["60"])
+        }
+    }
+
     #[test]
     fn rejects_stream_shapes_the_native_broker_cannot_preserve() {
         let mut null_stream = params("ignored", &[]);
@@ -492,8 +585,40 @@ mod tests {
             fd: 3,
             direction: ProcessFdDirection::Output,
         });
+        #[cfg(unix)]
+        assert!(spawn_request(&extra_fd).is_ok());
+        #[cfg(not(unix))]
         assert!(matches!(
             spawn_request(&extra_fd),
+            Err(RpcAdapterError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_additional_fd_shapes_before_spawn() {
+        let mut below_stdio = params("ignored", &[]);
+        below_stdio.additional_fds.push(ProcessAdditionalFd {
+            fd: 2,
+            direction: ProcessFdDirection::Output,
+        });
+        assert!(matches!(
+            spawn_request(&below_stdio),
+            Err(RpcAdapterError::InvalidRequest(_))
+        ));
+
+        let mut duplicate = params("ignored", &[]);
+        duplicate.additional_fds.extend([
+            ProcessAdditionalFd {
+                fd: 3,
+                direction: ProcessFdDirection::Input,
+            },
+            ProcessAdditionalFd {
+                fd: 3,
+                direction: ProcessFdDirection::Output,
+            },
+        ]);
+        assert!(matches!(
+            spawn_request(&duplicate),
             Err(RpcAdapterError::InvalidRequest(_))
         ));
     }
@@ -503,6 +628,61 @@ mod tests {
         let bytes = [0_u8, 1, 2, 127, 128, 255];
         assert_eq!(decode_base64(&encode_base64(&bytes)), Ok(bytes.to_vec()));
         assert_eq!(decode_base64("a==="), Err(RpcAdapterError::InvalidBase64));
+    }
+
+    #[test]
+    fn blocked_receiver_does_not_hold_adapter_during_spawn_or_cancel() {
+        let mut adapter = RpcProcessBroker::new(ProcessBroker::new(BrokerConfig::default()));
+        let receiver = adapter.subscribe_events();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let consumer = thread::spawn(move || {
+            ready_tx.send(()).expect("consumer starts");
+            receiver.next()
+        });
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("consumer reached blocking receive");
+
+        let spawned = adapter
+            .spawn(long_running_params())
+            .expect("spawn is independent of the blocked receiver");
+        let outcome = adapter
+            .cancel(crate::rpc::protocol::ProcessCancelParams {
+                attempt_id: "attempt-test".to_owned(),
+            })
+            .expect("control is independent of the blocked receiver");
+        assert!(matches!(
+            outcome,
+            ReleaseOutcome::Terminated | ReleaseOutcome::AlreadyExited
+        ));
+
+        let event = consumer
+            .join()
+            .expect("consumer thread joins")
+            .expect("cancellation emits an event")
+            .expect("event maps to RPC");
+        assert!(matches!(
+            event.params,
+            Some(RpcParams::ProcessExit(ProcessExitParams { process_id, .. }))
+                if process_id == spawned.process_id
+        ));
+    }
+
+    #[test]
+    fn blocked_receiver_wakes_when_transport_closes() {
+        let mut adapter = RpcProcessBroker::new(ProcessBroker::new(BrokerConfig::default()));
+        let receiver = adapter.subscribe_events();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let consumer = thread::spawn(move || {
+            ready_tx.send(()).expect("consumer starts");
+            receiver.next()
+        });
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("consumer reached blocking receive");
+
+        adapter.transport_close();
+        assert!(consumer.join().expect("consumer thread joins").is_none());
     }
 
     #[test]
@@ -538,5 +718,89 @@ mod tests {
             }
         }
         assert!(saw_exit);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maps_additional_output_fd_to_its_wire_descriptor() {
+        let mut request = params("sh", &["-c", "printf extra >&3"]);
+        request.additional_fds.push(ProcessAdditionalFd {
+            fd: 3,
+            direction: ProcessFdDirection::Output,
+        });
+        let mut adapter = RpcProcessBroker::new(ProcessBroker::new(BrokerConfig::default()));
+        let spawned = adapter.spawn(request).expect("fixture process spawns");
+        let mut saw_extra = false;
+        for _ in 0..4 {
+            let event = adapter
+                .next_event()
+                .expect("fixture emits events")
+                .expect("event maps to RPC");
+            match event.params {
+                Some(RpcParams::ProcessOutput(ProcessOutputParams {
+                    process_id,
+                    fd,
+                    bytes_base64,
+                    ..
+                })) if process_id == spawned.process_id => {
+                    if fd == 3 {
+                        saw_extra = true;
+                        assert_eq!(decode_base64(&bytes_base64), Ok(b"extra".to_vec()));
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_extra);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writes_process_input_to_configured_additional_fd() {
+        let mut request = params(
+            "sh",
+            &["-c", "IFS= read -r line <&4; printf '%s' \"$line\""],
+        );
+        request.additional_fds.push(ProcessAdditionalFd {
+            fd: 4,
+            direction: ProcessFdDirection::Input,
+        });
+        let mut adapter = RpcProcessBroker::new(ProcessBroker::new(BrokerConfig::default()));
+        let spawned = adapter.spawn(request).expect("fixture process spawns");
+        let registration_id = spawned
+            .registration_id
+            .0
+            .expect("fixture remains registered");
+        let outcome = adapter
+            .input(ProcessInputParams {
+                process_id: spawned.process_id.clone(),
+                registration_id,
+                fd: 4,
+                bytes_base64: encode_base64(b"hello\n"),
+            })
+            .expect("additional input is accepted");
+        assert_eq!(outcome, StdinOutcome::Written(6));
+        let mut saw_output = false;
+        for _ in 0..4 {
+            let event = adapter
+                .next_event()
+                .expect("fixture emits events")
+                .expect("event maps to RPC");
+            if let Some(RpcParams::ProcessOutput(ProcessOutputParams {
+                process_id,
+                fd,
+                bytes_base64,
+                ..
+            })) = event.params
+            {
+                if process_id == spawned.process_id && fd == 1 {
+                    saw_output = true;
+                    assert_eq!(decode_base64(&bytes_base64), Ok(b"hello".to_vec()));
+                    break;
+                }
+            }
+        }
+        assert!(saw_output);
     }
 }

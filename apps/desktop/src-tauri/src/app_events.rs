@@ -63,6 +63,8 @@ pub enum AppEvent {
     Native(NativeEvent),
     Host(HostNotification),
     PeerClosed,
+    /// The shell's quit deadline expired before an authorized continuation.
+    ShellDeadlineElapsed,
 }
 
 /// Effects that the native/transport integration must apply.
@@ -169,6 +171,9 @@ pub fn reduce(platform: Platform, state: State, event: AppEvent) -> AppTransitio
         AppEvent::Native(native) => reduce_native(platform, state, native),
         AppEvent::Host(notification) => reduce_host(state, notification),
         AppEvent::PeerClosed => lifecycle_transition(state, LifecycleEvent::TransportClosed),
+        AppEvent::ShellDeadlineElapsed => {
+            lifecycle_transition(state, LifecycleEvent::ShellDeadlineElapsed)
+        }
     }
 }
 

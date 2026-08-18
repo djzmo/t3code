@@ -11,6 +11,7 @@ use super::identity::{
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
+use std::fs::File;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -19,8 +20,36 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
+#[cfg(unix)]
+use command_fds::{CommandFdExt, FdMapping};
+#[cfg(any(
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "haiku",
+    target_os = "linux"
+))]
+use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid};
+#[cfg(target_os = "macos")]
+use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+#[cfg(unix)]
+use nix::unistd::pipe;
+#[cfg(unix)]
+use nix::{
+    sys::signal::{Signal, killpg},
+    unistd::{Pid, getpgid},
+};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 /// A process output chunk is never larger than this value.
 pub const MAX_OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
+
+/// The maximum number of non-stdio descriptors accepted for one child.
+///
+/// The protocol currently needs only descriptors 3, 4, and 5.  Keeping a
+/// small finite bound prevents a hostile request from allocating an
+/// unbounded number of native pipes before the child is even created.
+pub const MAX_ADDITIONAL_FDS: usize = 16;
 
 /// Logical process categories understood by the shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -36,6 +65,22 @@ pub enum ProcessKind {
 pub enum OutputStream {
     Stdout,
     Stderr,
+    Additional(u32),
+}
+
+/// Direction of a descriptor requested in [`SpawnRequest::additional_fds`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AdditionalFdDirection {
+    Input,
+    Output,
+}
+
+/// A descriptor inherited by the child and exposed through broker events or
+/// `process.input` writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AdditionalFdSpec {
+    pub fd: u32,
+    pub direction: AdditionalFdDirection,
 }
 
 /// Opaque token minted by the shell for a pending spawn transaction.
@@ -88,6 +133,9 @@ pub struct SpawnRequest {
     /// A transport adapter may set this when decoding a hostile request.  It
     /// is rejected before a process is created.
     pub shell: Option<OsString>,
+    /// Additional descriptors inherited by the child.  Descriptor numbers
+    /// must be >= 3 and unique; stdio is configured separately above.
+    pub additional_fds: Vec<AdditionalFdSpec>,
 }
 
 impl SpawnRequest {
@@ -102,6 +150,7 @@ impl SpawnRequest {
             kind: ProcessKind::Other,
             detached: false,
             shell: None,
+            additional_fds: Vec::new(),
         }
     }
 
@@ -118,6 +167,12 @@ impl SpawnRequest {
     #[must_use]
     pub fn with_kind(mut self, kind: ProcessKind) -> Self {
         self.kind = kind;
+        self
+    }
+
+    #[must_use]
+    pub fn with_additional_fds(mut self, additional_fds: Vec<AdditionalFdSpec>) -> Self {
+        self.additional_fds = additional_fds;
         self
     }
 }
@@ -296,9 +351,18 @@ impl std::error::Error for BrokerError {}
 struct ProcessRecord {
     attempt_id: AttemptToken,
     identity: ProcessIdentity,
+    #[cfg(unix)]
+    process_group: ProcessGroup,
     child: Mutex<Child>,
     stdin: Mutex<Option<ChildStdin>>,
+    additional_inputs: Mutex<HashMap<u32, File>>,
     state: Mutex<RecordState>,
+    /// Serializes non-reaping observation and final cleanup.  The group
+    /// leader must remain unreaped until cleanup has sent the group signal;
+    /// otherwise a recycled PGID could refer to an unrelated process group.
+    reap_gate: Mutex<()>,
+    #[cfg(unix)]
+    group_cleanup_safe: AtomicBool,
     streams_remaining: AtomicU64,
 }
 
@@ -306,6 +370,7 @@ struct ProcessRecord {
 struct RecordState {
     registration_id: Option<RegistrationToken>,
     exit: Option<ExitStatusInfo>,
+    leader_reaped: bool,
     released: bool,
 }
 
@@ -326,6 +391,39 @@ struct BrokerInner {
     sequencer: Arc<EventSequencer>,
     next_token: AtomicU64,
     closed: AtomicBool,
+    #[cfg(test)]
+    registration_barrier: Mutex<Option<Arc<RegistrationBarrier>>>,
+    #[cfg(test)]
+    close_barrier: Mutex<Option<Arc<RegistrationBarrier>>>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+struct ProcessGroup {
+    pgid: Pid,
+}
+
+#[cfg(unix)]
+impl ProcessGroup {
+    fn for_child(pid: u32) -> Result<Self, String> {
+        let pid =
+            i32::try_from(pid).map_err(|_| "child pid is outside the Unix range".to_owned())?;
+        if pid <= 1 {
+            return Err("refusing to manage a reserved process group".to_owned());
+        }
+        let pgid = Pid::from_raw(pid);
+        let actual = getpgid(Some(pgid)).map_err(|error| error.to_string())?;
+        if actual != pgid {
+            return Err(format!(
+                "child process group mismatch: expected {pgid}, got {actual}"
+            ));
+        }
+        Ok(Self { pgid })
+    }
+
+    fn terminate(&self) -> Result<(), nix::errno::Errno> {
+        killpg(self.pgid, Signal::SIGKILL)
+    }
 }
 
 /// Thread-safe native child broker.
@@ -364,6 +462,10 @@ impl ProcessBroker {
                 events,
                 next_token: AtomicU64::new(1),
                 closed: AtomicBool::new(false),
+                #[cfg(test)]
+                registration_barrier: Mutex::new(None),
+                #[cfg(test)]
+                close_barrier: Mutex::new(None),
             }),
         }
     }
@@ -380,6 +482,19 @@ impl ProcessBroker {
         validate_request(&request)?;
         let attempt_id = self.acquire_transaction()?;
 
+        #[cfg(unix)]
+        let (additional_mappings, additional_inputs, additional_outputs) =
+            match prepare_additional_fds(&request.additional_fds) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.finish_transaction(attempt_id);
+                    return Err(BrokerError::Spawn(error));
+                }
+            };
+        #[cfg(not(unix))]
+        let (additional_inputs, additional_outputs) =
+            (HashMap::<u32, File>::new(), Vec::<(u32, File)>::new());
+
         let mut command = Command::new(&request.executable);
         command.args(&request.args);
         if let Some(cwd) = request.cwd.as_ref() {
@@ -395,6 +510,20 @@ impl ProcessBroker {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
 
+        #[cfg(unix)]
+        // Keep every brokered direct child as the leader of its own process
+        // group.  Descendants that deliberately call `setsid`/detach are
+        // outside this group by design and remain the server's boundary.
+        command.process_group(0);
+
+        #[cfg(unix)]
+        if let Err(error) = command.fd_mappings(additional_mappings) {
+            self.finish_transaction(attempt_id);
+            return Err(BrokerError::Spawn(format!(
+                "failed to configure additional file descriptors: {error}"
+            )));
+        }
+
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -404,22 +533,54 @@ impl ProcessBroker {
         };
         let pid = child.id();
         let spawned_at = SystemTime::now();
-        let identity = self
-            .inner
-            .identity
-            .capture(&child, pid, spawned_at)
-            .unwrap_or_else(|_| ProcessIdentity::unproven(pid, millis(spawned_at)));
+        let identity = match self.inner.identity.capture(&child, pid, spawned_at) {
+            Ok(identity) => identity,
+            Err(error) => {
+                // No record or waiter exists yet, so the retained child is
+                // still an unreaped process-group leader.  Kill its private
+                // group first; if the group operation is unavailable, the
+                // retained unreaped Child is still reserved against PID
+                // reuse and can be killed safely before being waited.
+                #[cfg(unix)]
+                if let Ok(process_group) = ProcessGroup::for_child(pid) {
+                    let _ = process_group.terminate();
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                self.finish_transaction(attempt_id);
+                return Err(BrokerError::Identity(error));
+            }
+        };
         let identity_proven = !matches!(identity.proof, super::identity::IdentityProof::Unproven);
+        #[cfg(unix)]
+        let process_group = match ProcessGroup::for_child(pid) {
+            Ok(process_group) => process_group,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                self.finish_transaction(attempt_id);
+                return Err(BrokerError::Spawn(error));
+            }
+        };
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        let streams_remaining = u64::from(stdout.is_some()) + u64::from(stderr.is_some());
+        let additional_output_count = additional_outputs.len();
+        let streams_remaining = u64::from(stdout.is_some())
+            + u64::from(stderr.is_some())
+            + u64::try_from(additional_output_count).unwrap_or(u64::MAX);
         let record = Arc::new(ProcessRecord {
             attempt_id,
             identity,
+            #[cfg(unix)]
+            process_group,
             child: Mutex::new(child),
             stdin: Mutex::new(stdin),
+            additional_inputs: Mutex::new(additional_inputs),
             state: Mutex::new(RecordState::default()),
+            reap_gate: Mutex::new(()),
+            #[cfg(unix)]
+            group_cleanup_safe: AtomicBool::new(true),
             streams_remaining: AtomicU64::new(streams_remaining),
         });
 
@@ -454,6 +615,14 @@ impl ProcessBroker {
                 self.inner.sequencer.clone(),
             );
         }
+        for (fd, reader) in additional_outputs {
+            spawn_reader(
+                reader,
+                record.clone(),
+                OutputStream::Additional(fd),
+                self.inner.sequencer.clone(),
+            );
+        }
         spawn_waiter(record, self.inner.clone());
 
         Ok(SpawnedProcess {
@@ -468,42 +637,59 @@ impl ProcessBroker {
     /// the required `{ registrationId: null }` result and still emits output
     /// and an exit event through the ordinary event queue.
     pub fn register(&self, attempt_id: AttemptToken) -> Result<RegistrationOutcome, BrokerError> {
-        let record = self.find_attempt(attempt_id)?;
-        let mut child = lock(&record.child);
-        let exited = child
-            .try_wait()
-            .map_err(|error| BrokerError::Io(error.to_string()))?
-            .map(ExitStatusInfo::from_status);
-        let mut record_state = lock(&record.state);
-        if record_state.released {
-            return Err(BrokerError::StaleAttempt);
-        }
-        if let Some(existing) = record_state.registration_id {
-            self.finish_transaction(attempt_id);
-            return Ok(RegistrationOutcome {
-                registration_id: Some(existing),
-                exited: record_state.exit,
-            });
-        }
-        if let Some(status) = exited {
-            record_state.exit = Some(status);
-            self.finish_transaction(attempt_id);
-            return Ok(RegistrationOutcome {
-                registration_id: None,
-                exited: Some(status),
-            });
-        }
-        let registration_id = self.next_registration_token();
-        record_state.registration_id = Some(registration_id);
-        drop(record_state);
-        drop(child);
-        let mut state = lock(&self.inner.state);
-        state.registrations.insert(registration_id, attempt_id);
+        // Hold the broker registry lock across the entire acknowledgement.
+        // `transport_close` marks the broker closed before acquiring this
+        // lock, so a close either wins before this block (and no token is
+        // minted) or drains the fully inserted registration afterwards.  In
+        // particular, do not update `record.state` and `state.registrations`
+        // in separate critical sections: doing so permits a late ack to
+        // recreate a token after transport cleanup has already drained the
+        // registry.
+        let outcome: Result<RegistrationOutcome, BrokerError> = {
+            let mut state = lock(&self.inner.state);
+            if self.inner.closed.load(Ordering::Acquire) {
+                Err(BrokerError::Closed)
+            } else if let Some(record) = state.attempts.get(&attempt_id).cloned() {
+                let _reap_guard = lock(&record.reap_gate);
+                let mut child = lock(&record.child);
+                match child.try_wait() {
+                    Err(error) => Err(BrokerError::Io(error.to_string())),
+                    Ok(status) => {
+                        let exited = status.map(ExitStatusInfo::from_status);
+                        let mut record_state = lock(&record.state);
+                        if record_state.released {
+                            Err(BrokerError::StaleAttempt)
+                        } else if let Some(existing) = record_state.registration_id {
+                            Ok(RegistrationOutcome {
+                                registration_id: Some(existing),
+                                exited: record_state.exit,
+                            })
+                        } else if let Some(status) = exited {
+                            record_state.leader_reaped = true;
+                            record_state.exit = Some(status);
+                            Ok(RegistrationOutcome {
+                                registration_id: None,
+                                exited: Some(status),
+                            })
+                        } else {
+                            let registration_id = self.next_registration_token();
+                            record_state.registration_id = Some(registration_id);
+                            #[cfg(test)]
+                            self.pause_registration_for_test();
+                            state.registrations.insert(registration_id, attempt_id);
+                            Ok(RegistrationOutcome {
+                                registration_id: Some(registration_id),
+                                exited: None,
+                            })
+                        }
+                    }
+                }
+            } else {
+                Err(BrokerError::StaleAttempt)
+            }
+        };
         self.finish_transaction(attempt_id);
-        Ok(RegistrationOutcome {
-            registration_id: Some(registration_id),
-            exited: None,
-        })
+        outcome
     }
 
     /// Cancel a pending transaction or a late registration.  The operation is
@@ -562,27 +748,64 @@ impl ProcessBroker {
         token: T,
         bytes: &[u8],
     ) -> Result<StdinOutcome, BrokerError> {
+        self.write_input(token, 0, bytes)
+    }
+
+    /// Write bytes to stdin or one of the configured additional input
+    /// descriptors.  The token may be either the pending attempt or its
+    /// registration token.
+    pub fn write_input<T: IntoToken>(
+        &self,
+        token: T,
+        fd: u32,
+        bytes: &[u8],
+    ) -> Result<StdinOutcome, BrokerError> {
         let record = self.find_token(token)?;
         if lock(&record.state).released {
             return Ok(StdinOutcome::Closed);
         }
-        let mut stdin = lock(&record.stdin);
-        let Some(stdin) = stdin.as_mut() else {
-            return Ok(StdinOutcome::Closed);
-        };
-        stdin
-            .write_all(bytes)
-            .map_err(|error| BrokerError::Io(error.to_string()))?;
-        stdin
-            .flush()
-            .map_err(|error| BrokerError::Io(error.to_string()))?;
+        if fd == 0 {
+            let mut stdin = lock(&record.stdin);
+            let Some(stdin) = stdin.as_mut() else {
+                return Ok(StdinOutcome::Closed);
+            };
+            stdin
+                .write_all(bytes)
+                .map_err(|error| BrokerError::Io(error.to_string()))?;
+            stdin
+                .flush()
+                .map_err(|error| BrokerError::Io(error.to_string()))?;
+        } else {
+            let mut inputs = lock(&record.additional_inputs);
+            let Some(input) = inputs.get_mut(&fd) else {
+                return Err(BrokerError::InvalidRequest(format!(
+                    "fd {fd} is not configured as an input descriptor"
+                )));
+            };
+            input
+                .write_all(bytes)
+                .map_err(|error| BrokerError::Io(error.to_string()))?;
+            input
+                .flush()
+                .map_err(|error| BrokerError::Io(error.to_string()))?;
+        }
         Ok(StdinOutcome::Written(bytes.len()))
     }
 
     /// Close stdin without affecting the process lifetime.
     pub fn close_stdin<T: IntoToken>(&self, token: T) -> Result<(), BrokerError> {
+        self.close_input(token, 0)
+    }
+
+    /// Close stdin or one configured additional input descriptor without
+    /// affecting the process lifetime.
+    pub fn close_input<T: IntoToken>(&self, token: T, fd: u32) -> Result<(), BrokerError> {
         let record = self.find_token(token)?;
-        lock(&record.stdin).take();
+        if fd == 0 {
+            lock(&record.stdin).take();
+        } else {
+            lock(&record.additional_inputs).remove(&fd);
+        }
         Ok(())
     }
 
@@ -594,6 +817,8 @@ impl ProcessBroker {
         if self.inner.closed.swap(true, Ordering::AcqRel) {
             return Vec::new();
         }
+        #[cfg(test)]
+        self.pause_close_for_test();
         let records = {
             let mut state = lock(&self.inner.state);
             let records = state.attempts.drain().collect::<Vec<_>>();
@@ -622,31 +847,84 @@ impl ProcessBroker {
     }
 
     fn release_record(&self, record: &Arc<ProcessRecord>) -> Result<ReleaseOutcome, BrokerError> {
+        let _reap_guard = lock(&record.reap_gate);
         let mut child = lock(&record.child);
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| BrokerError::Io(error.to_string()))?
-            .map(ExitStatusInfo::from_status)
-        {
-            let mut state = lock(&record.state);
-            state.exit = Some(status);
-            state.released = true;
-            state.registration_id = None;
-            return Ok(ReleaseOutcome::AlreadyExited);
-        }
+        #[cfg(unix)]
+        let leader_reaped = lock(&record.state).leader_reaped;
+        #[cfg(not(unix))]
+        let _leader_reaped = lock(&record.state).leader_reaped;
+        #[cfg(unix)]
+        let group_cleanup_safe = record.group_cleanup_safe.load(Ordering::Acquire);
+
+        // A non-reaped group leader reserves its PGID.  Signal the group
+        // while the reservation is held, then let the identity backend deal
+        // with the direct child and reap the leader last.  If observation had
+        // to fall back to Child::try_wait, the leader may already have been
+        // reaped, so fail closed and never signal that recycled PGID.
+        #[cfg(unix)]
+        let group_cleanup_attempted = !leader_reaped && group_cleanup_safe;
+        #[cfg(unix)]
+        let group_result = if group_cleanup_attempted {
+            match record.process_group.terminate() {
+                Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
+                Err(error) => Err(BrokerError::Io(format!(
+                    "process-group cleanup failed: {error}"
+                ))),
+            }
+        } else {
+            Ok(())
+        };
+        #[cfg(not(unix))]
+        let group_cleanup_attempted = false;
+        #[cfg(not(unix))]
+        let group_result: Result<(), BrokerError> = Ok(());
+
         let identity = record.identity.clone();
-        let outcome = self
-            .inner
-            .identity
-            .terminate(&mut child, &identity)
-            .map_err(BrokerError::Identity);
+        let identity_result = self.inner.identity.terminate(&mut child, &identity);
+        let direct_outcome = identity_result.as_ref().map(|result| match result {
+            TerminateResult::Terminated => ReleaseOutcome::Terminated,
+            TerminateResult::AlreadyExited => ReleaseOutcome::AlreadyExited,
+        });
+
+        let mut reap_error = None;
+        if matches!(identity_result, Ok(TerminateResult::AlreadyExited)) {
+            // The identity backend may have observed and reaped a naturally
+            // exited leader while checking its proof.  Do not call wait a
+            // second time in that case.
+            lock(&record.state).leader_reaped = true;
+        } else if group_result.is_ok() && group_cleanup_attempted {
+            match child.wait() {
+                Ok(status) => {
+                    let mut state = lock(&record.state);
+                    state.exit = Some(ExitStatusInfo::from_status(status));
+                    state.leader_reaped = true;
+                }
+                Err(error) => {
+                    reap_error = Some(BrokerError::Io(error.to_string()));
+                }
+            }
+        }
+
         let mut state = lock(&record.state);
         state.released = true;
         state.registration_id = None;
-        outcome.map(|result| match result {
-            TerminateResult::Terminated => ReleaseOutcome::Terminated,
-            TerminateResult::AlreadyExited => ReleaseOutcome::AlreadyExited,
-        })
+        if let Some(error) = reap_error {
+            return Err(error);
+        }
+        group_result?;
+        match direct_outcome {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                // A successful group kill is an identity-safe termination of
+                // this retained group leader even when a platform backend
+                // reports that its direct-child proof is unavailable.
+                #[cfg(unix)]
+                if group_cleanup_attempted {
+                    return Ok(ReleaseOutcome::Terminated);
+                }
+                Err(BrokerError::Identity(error.clone()))
+            }
+        }
     }
 
     fn find_attempt(&self, attempt_id: AttemptToken) -> Result<Arc<ProcessRecord>, BrokerError> {
@@ -710,6 +988,67 @@ impl ProcessBroker {
         RegistrationToken(u128::from(
             self.inner.next_token.fetch_add(1, Ordering::Relaxed),
         ))
+    }
+
+    #[cfg(test)]
+    fn pause_registration_for_test(&self) {
+        let barrier = lock(&self.inner.registration_barrier).clone();
+        if let Some(barrier) = barrier {
+            barrier.pause();
+        }
+    }
+
+    #[cfg(test)]
+    fn pause_close_for_test(&self) {
+        let barrier = lock(&self.inner.close_barrier).clone();
+        if let Some(barrier) = barrier {
+            barrier.pause();
+        }
+    }
+}
+
+#[cfg(test)]
+struct RegistrationBarrier {
+    reached: Mutex<bool>,
+    reached_ready: Condvar,
+    released: Mutex<bool>,
+    released_ready: Condvar,
+}
+
+#[cfg(test)]
+impl RegistrationBarrier {
+    fn new() -> Self {
+        Self {
+            reached: Mutex::new(false),
+            reached_ready: Condvar::new(),
+            released: Mutex::new(false),
+            released_ready: Condvar::new(),
+        }
+    }
+
+    fn pause(&self) {
+        {
+            let mut reached = lock(&self.reached);
+            *reached = true;
+            self.reached_ready.notify_all();
+        }
+        let mut released = lock(&self.released);
+        while !*released {
+            released = wait(&self.released_ready, released);
+        }
+    }
+
+    fn wait_until_reached(&self) {
+        let mut reached = lock(&self.reached);
+        while !*reached {
+            reached = wait(&self.reached_ready, reached);
+        }
+    }
+
+    fn release(&self) {
+        let mut released = lock(&self.released);
+        *released = true;
+        self.released_ready.notify_all();
     }
 }
 
@@ -828,7 +1167,10 @@ struct EventSequencer {
 impl EventSequencer {
     fn new(events: Arc<EventQueue>) -> Self {
         Self {
-            next_assigned: AtomicU64::new(1),
+            // The host-side BrokeredChildProcess contract is zero-based.  A
+            // one-based first event is treated as a dropped frame and closes
+            // the process handle before any output can be consumed.
+            next_assigned: AtomicU64::new(0),
             emit_lock: Mutex::new(()),
             events,
         }
@@ -905,27 +1247,120 @@ fn spawn_reader<R: Read + Send + 'static>(
         });
 }
 
+#[cfg(any(
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "haiku",
+    target_os = "linux"
+))]
+fn observe_child_exit(pid: u32) -> Result<Option<ExitStatusInfo>, String> {
+    let pid = i32::try_from(pid).map_err(|_| "child pid is outside the Unix range".to_owned())?;
+    let status = waitid(
+        Id::Pid(Pid::from_raw(pid)),
+        WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(match status {
+        WaitStatus::Exited(_, code) => Some(ExitStatusInfo {
+            success: true,
+            code: Some(code),
+            signal: None,
+        }),
+        WaitStatus::Signaled(_, signal, _) => Some(ExitStatusInfo {
+            success: false,
+            code: None,
+            signal: Some(signal as i32),
+        }),
+        _ => None,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn observe_child_exit(pid: u32) -> Result<Option<ExitStatusInfo>, String> {
+    let pid = i32::try_from(pid).map_err(|_| "child pid is outside the Unix range".to_owned())?;
+    let status = waitpid(
+        Pid::from_raw(pid),
+        Some(WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(match status {
+        WaitStatus::Exited(_, code) => Some(ExitStatusInfo {
+            success: true,
+            code: Some(code),
+            signal: None,
+        }),
+        WaitStatus::Signaled(_, signal, _) => Some(ExitStatusInfo {
+            success: false,
+            code: None,
+            signal: Some(signal as i32),
+        }),
+        _ => None,
+    })
+}
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "haiku",
+        target_os = "linux",
+        target_os = "macos"
+    ))
+))]
+fn observe_child_exit(_pid: u32) -> Result<Option<ExitStatusInfo>, String> {
+    Err("non-reaping child observation is unsupported on this Unix target".to_owned())
+}
+
 fn spawn_waiter(record: Arc<ProcessRecord>, inner: Arc<BrokerInner>) {
     let _ = thread::Builder::new()
         .name("nanoni-process-wait".to_string())
         .spawn(move || {
-            // `Child::wait` holds a mutable borrow for the duration of the
-            // wait, which would prevent the release path from using the
-            // retained handle to terminate a still-running process.  Polling
-            // `try_wait` with a short park keeps the handle available to the
-            // broker while preserving a single native Child owner.
             let status = loop {
-                let status = {
+                if let Some(status) = lock(&record.state).exit {
+                    break status;
+                }
+
+                let _reap_guard = lock(&record.reap_gate);
+                if let Some(status) = lock(&record.state).exit {
+                    break status;
+                }
+
+                #[cfg(unix)]
+                let observed = observe_child_exit(record.identity.pid);
+                #[cfg(not(unix))]
+                let observed = {
                     let mut child = lock(&record.child);
                     child
                         .try_wait()
-                        .ok()
-                        .flatten()
-                        .map(ExitStatusInfo::from_status)
+                        .map(|status| status.map(ExitStatusInfo::from_status))
+                        .map_err(|error| error.to_string())
                 };
-                if let Some(status) = status {
-                    break status;
+
+                match observed {
+                    Ok(Some(status)) => {
+                        lock(&record.state).exit = Some(status);
+                        break status;
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        // If WNOWAIT/waitid is unavailable, fall back to
+                        // std's reaping wait only after disabling group
+                        // cleanup.  A reaped leader no longer reserves its
+                        // PGID, so release_record will never signal it.
+                        #[cfg(unix)]
+                        record.group_cleanup_safe.store(false, Ordering::Release);
+                        let mut child = lock(&record.child);
+                        if let Ok(Some(status)) = child.try_wait() {
+                            let status = ExitStatusInfo::from_status(status);
+                            let mut state = lock(&record.state);
+                            state.leader_reaped = true;
+                            state.exit = Some(status);
+                            break status;
+                        }
+                    }
                 }
+                drop(_reap_guard);
                 thread::park_timeout(Duration::from_millis(10));
             };
             while record.streams_remaining.load(Ordering::Acquire) != 0 {
@@ -961,9 +1396,89 @@ fn validate_request(request: &SpawnRequest) -> Result<(), BrokerError> {
             "shell execution is not allowed; pass an executable and argv".to_string(),
         ));
     }
+    validate_additional_fds(&request.additional_fds)?;
     Ok(())
 }
 
+pub(crate) fn validate_additional_fds(
+    additional_fds: &[AdditionalFdSpec],
+) -> Result<(), BrokerError> {
+    #[cfg(not(unix))]
+    if !additional_fds.is_empty() {
+        return Err(BrokerError::InvalidRequest(
+            "additional file descriptors are unsupported on this platform".to_owned(),
+        ));
+    }
+    if additional_fds.len() > MAX_ADDITIONAL_FDS {
+        return Err(BrokerError::InvalidRequest(format!(
+            "at most {MAX_ADDITIONAL_FDS} additional file descriptors are allowed"
+        )));
+    }
+    let mut seen = HashSet::with_capacity(additional_fds.len());
+    for descriptor in additional_fds {
+        if descriptor.fd < 3 {
+            return Err(BrokerError::InvalidRequest(format!(
+                "additional file descriptor {} must be >= 3",
+                descriptor.fd
+            )));
+        }
+        if descriptor.fd > i32::MAX as u32 {
+            return Err(BrokerError::InvalidRequest(format!(
+                "additional file descriptor {} is outside the native fd range",
+                descriptor.fd
+            )));
+        }
+        if !seen.insert(descriptor.fd) {
+            return Err(BrokerError::InvalidRequest(format!(
+                "additional file descriptor {} is configured more than once",
+                descriptor.fd
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn prepare_additional_fds(
+    additional_fds: &[AdditionalFdSpec],
+) -> Result<(Vec<FdMapping>, HashMap<u32, File>, Vec<(u32, File)>), String> {
+    let mut mappings = Vec::with_capacity(additional_fds.len());
+    let mut inputs = HashMap::new();
+    let mut outputs = Vec::new();
+    for descriptor in additional_fds {
+        let (read_end, write_end) = pipe().map_err(|error| {
+            format!(
+                "failed to create pipe for additional fd {}: {error}",
+                descriptor.fd
+            )
+        })?;
+        let child_fd = i32::try_from(descriptor.fd).map_err(|_| {
+            format!(
+                "additional file descriptor {} is outside the native fd range",
+                descriptor.fd
+            )
+        })?;
+        match descriptor.direction {
+            AdditionalFdDirection::Input => {
+                mappings.push(FdMapping {
+                    parent_fd: read_end,
+                    child_fd,
+                });
+                inputs.insert(descriptor.fd, File::from(write_end));
+            }
+            AdditionalFdDirection::Output => {
+                mappings.push(FdMapping {
+                    parent_fd: write_end,
+                    child_fd,
+                });
+                outputs.push((descriptor.fd, File::from(read_end)));
+            }
+        }
+    }
+    Ok((mappings, inputs, outputs))
+}
+
+#[cfg(test)]
 fn millis(time: SystemTime) -> u64 {
     time.duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
@@ -992,6 +1507,7 @@ fn wait<'a, T>(
 mod tests {
     use super::*;
     use crate::host::identity::{IdentityProof, TerminateResult};
+    use std::sync::mpsc;
 
     #[derive(Debug, Default, Clone, Copy)]
     struct TestIdentityBackend;
@@ -1158,6 +1674,58 @@ mod tests {
     }
 
     #[test]
+    fn registration_ack_and_transport_close_cannot_leave_a_late_token() {
+        let broker =
+            ProcessBroker::with_identity_backend(BrokerConfig::default(), TestIdentityBackend);
+        let spawned = broker.spawn(long_running()).expect("child should spawn");
+        let registration_barrier = Arc::new(RegistrationBarrier::new());
+        let close_barrier = Arc::new(RegistrationBarrier::new());
+        *lock(&broker.inner.registration_barrier) = Some(registration_barrier.clone());
+        *lock(&broker.inner.close_barrier) = Some(close_barrier.clone());
+
+        let (registration_sender, registration_receiver) = mpsc::sync_channel(1);
+        let registration_broker = broker.clone();
+        let attempt_id = spawned.attempt_id;
+        thread::spawn(move || {
+            let result = registration_broker.register(attempt_id);
+            registration_sender
+                .send(result)
+                .expect("registration receiver should remain open");
+        });
+        registration_barrier.wait_until_reached();
+
+        let (close_sender, close_receiver) = mpsc::sync_channel(1);
+        let close_broker = broker.clone();
+        thread::spawn(move || {
+            close_sender
+                .send(close_broker.transport_close())
+                .expect("close receiver should remain open");
+        });
+        close_barrier.wait_until_reached();
+
+        // The close has marked the broker closed, but cannot acquire the
+        // registry lock while registration is paused.  The ack therefore
+        // cannot finish before the registration barrier is released.
+        assert!(registration_receiver.try_recv().is_err());
+        assert!(close_receiver.try_recv().is_err());
+
+        registration_barrier.release();
+        let registration = registration_receiver
+            .recv()
+            .expect("registration should finish after the barrier")
+            .expect("registration should commit before close drains it");
+        assert!(registration.registration_id.is_some());
+        assert!(close_receiver.try_recv().is_err());
+
+        close_barrier.release();
+        let report = close_receiver
+            .recv()
+            .expect("close should finish after the barrier");
+        assert_eq!(report.len(), 1);
+        assert!(lock(&broker.inner.state).registrations.is_empty());
+    }
+
+    #[test]
     fn ordered_chunks_have_monotonic_sequences_and_are_bounded() {
         let queue = Arc::new(EventQueue::new(BrokerConfig {
             max_events: 16,
@@ -1184,14 +1752,11 @@ mod tests {
         for handle in handles {
             let _ = handle.join();
         }
-        let mut previous = 0;
-        let mut seen = 0;
+        let mut sequences = Vec::new();
         while let Some(event) = queue.try_pop() {
             assert!(event.size() <= MAX_OUTPUT_CHUNK_BYTES);
-            assert!(event.sequence() > previous);
-            previous = event.sequence();
-            seen += 1;
+            sequences.push(event.sequence());
         }
-        assert_eq!(seen, 8);
+        assert_eq!(sequences, (0..8).collect::<Vec<_>>());
     }
 }
