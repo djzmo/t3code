@@ -1195,10 +1195,28 @@ fn transition_prevents_exit(transition: &AppTransition) -> bool {
     })
 }
 
+#[cfg(any(test, all(debug_assertions, feature = "topology-a-pilot")))]
+fn topology_a_benchmark_enabled(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
 fn main() {
-    let result = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_opener::init());
+
+    #[cfg(all(debug_assertions, feature = "topology-a-pilot"))]
+    let builder = if topology_a_benchmark_enabled(
+        std::env::var("AGENT_NANONI_TOPOLOGY_A_BENCH")
+            .ok()
+            .as_deref(),
+    ) {
+        builder.plugin(tauri_plugin_pilot::init())
+    } else {
+        builder
+    };
+
+    let result = builder
         .manage(BridgeRuntime::default())
         .setup(|app| {
             let runtime = app.state::<BridgeRuntime>().inner().clone();
@@ -1225,7 +1243,10 @@ mod tests {
     use agent_nanoni_desktop::lifecycle::{Action, State};
     use serde_json::Value;
 
-    use super::{native_exit_event, sidecar_compatible_path, transition_prevents_exit};
+    use super::{
+        native_exit_event, sidecar_compatible_path, topology_a_benchmark_enabled,
+        transition_prevents_exit,
+    };
 
     #[test]
     fn capability_is_scoped_to_main_webview() {
@@ -1241,6 +1262,21 @@ mod tests {
                     .iter()
                     .any(|permission| permission == "allow-host-invoke"))
         );
+        assert!(
+            capability["permissions"]
+                .as_array()
+                .is_some_and(|permissions| permissions
+                    .iter()
+                    .all(|permission| permission != "pilot:default"))
+        );
+    }
+
+    #[test]
+    fn topology_a_pilot_requires_the_exact_benchmark_flag() {
+        assert!(topology_a_benchmark_enabled(Some("1")));
+        assert!(!topology_a_benchmark_enabled(None));
+        assert!(!topology_a_benchmark_enabled(Some("true")));
+        assert!(!topology_a_benchmark_enabled(Some("0")));
     }
 
     #[test]

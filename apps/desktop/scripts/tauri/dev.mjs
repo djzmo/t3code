@@ -50,7 +50,7 @@ export function resolveDevelopmentIdentifier(canonicalPath) {
  * the base window, capabilities, and packaged URL scheme must remain intact;
  * only the per-worktree development identifier is changed.
  */
-export function createDevelopmentOverlay(identifier, devUrl) {
+export function createDevelopmentOverlay(identifier, devUrl, { topologyABenchmark = false } = {}) {
   const parsed = new URL(devUrl);
   if (
     parsed.protocol !== "http:" ||
@@ -61,6 +61,23 @@ export function createDevelopmentOverlay(identifier, devUrl) {
   return {
     identifier,
     build: { devUrl: parsed.href.replace(/\/$/, "") },
+    ...(topologyABenchmark
+      ? {
+          app: {
+            security: {
+              capabilities: [
+                "main",
+                {
+                  identifier: "topology-a-pilot",
+                  description: "Debug-only permission for the Phase 0 Topology A benchmark.",
+                  webviews: ["main"],
+                  permissions: ["pilot:default"],
+                },
+              ],
+            },
+          },
+        }
+      : {}),
   };
 }
 
@@ -118,7 +135,11 @@ export function createSpawnOptions({ cwd, env, platform = process.platform }) {
   };
 }
 
-export function resolveDevelopmentCommands({ overlayPath, extraArgs = [] }) {
+export function resolveDevelopmentCommands({
+  overlayPath,
+  extraArgs = [],
+  topologyABenchmark = false,
+}) {
   return {
     host: {
       command: executable("pnpm"),
@@ -138,6 +159,7 @@ export function resolveDevelopmentCommands({ overlayPath, extraArgs = [] }) {
         "dev",
         "--config",
         overlayPath,
+        ...(topologyABenchmark ? ["--features", "topology-a-pilot"] : []),
         ...extraArgs,
       ],
     },
@@ -158,12 +180,12 @@ export function resolveHostEnvironment(
   };
 }
 
-function writeOverlay({ directory, identifier, devUrl }) {
+function writeOverlay({ directory, identifier, devUrl, topologyABenchmark }) {
   NodeFS.mkdirSync(directory, { recursive: true });
   const overlayPath = NodePath.join(directory, "tauri.dev.conf.json");
   NodeFS.writeFileSync(
     overlayPath,
-    `${JSON.stringify(createDevelopmentOverlay(identifier, devUrl), null, 2)}\n`,
+    `${JSON.stringify(createDevelopmentOverlay(identifier, devUrl, { topologyABenchmark }), null, 2)}\n`,
     "utf8",
   );
   return overlayPath;
@@ -218,6 +240,7 @@ function waitForExit(child) {
 
 async function run() {
   const environment = resolveHostEnvironment(process.env);
+  const topologyABenchmark = environment.AGENT_NANONI_TOPOLOGY_A_BENCH === "1";
   assertSupportedSidecarNode();
   assertClerkAbsent(environment);
 
@@ -230,9 +253,15 @@ async function run() {
   const overlayDirectory = NodeFS.mkdtempSync(
     NodePath.join(NodeOS.tmpdir(), "agent-nanoni-tauri-dev-"),
   );
-  const overlayPath = writeOverlay({ directory: overlayDirectory, identifier, devUrl });
+  const overlayPath = writeOverlay({
+    directory: overlayDirectory,
+    identifier,
+    devUrl,
+    topologyABenchmark,
+  });
   const commands = resolveDevelopmentCommands({
     overlayPath,
+    topologyABenchmark,
     extraArgs: process.argv.slice(2),
   });
   const spawnOptions = createSpawnOptions({ cwd: repositoryRoot, env: environment });

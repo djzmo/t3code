@@ -146,6 +146,7 @@ describe("Topology A tauri-pilot runner", () => {
       assert.equal(capturedSpawn.command, "fake-tauri.exe");
       assert.deepEqual(capturedSpawn.args, ["--safe-arg"]);
       assert.isFalse(capturedSpawn.options.shell);
+      assert.equal(capturedSpawn.options.env.AGENT_NANONI_TOPOLOGY_A_BENCH, "1");
       assert.deepEqual(
         terminated.map(({ pid, groupId }) => ({ pid, groupId })),
         [{ pid: 4242, groupId: process.platform === "win32" ? null : 4242 }],

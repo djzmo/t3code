@@ -337,7 +337,7 @@ export async function runTopologyAPilot({
     if (appCommand !== undefined) {
       captured = spawnCapturedApplication(appCommand, {
         cwd: appCwd,
-        env: appEnv,
+        env: { ...appEnv, AGENT_NANONI_TOPOLOGY_A_BENCH: "1" },
         spawnProcess,
       });
     }

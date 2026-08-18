@@ -57,6 +57,30 @@ describe("Tauri development launcher", () => {
     );
   });
 
+  it("adds the Pilot feature and capability only for the explicit benchmark mode", () => {
+    assert.deepEqual(
+      createDevelopmentOverlay(
+        "app.nanoni.agent.desktop.dev.0123456789ab",
+        "http://127.0.0.1:5737",
+        { topologyABenchmark: true },
+      ).app.security.capabilities,
+      [
+        "main",
+        {
+          identifier: "topology-a-pilot",
+          description: "Debug-only permission for the Phase 0 Topology A benchmark.",
+          webviews: ["main"],
+          permissions: ["pilot:default"],
+        },
+      ],
+    );
+    const commands = resolveDevelopmentCommands({
+      overlayPath: "C:/temp/tauri.dev.conf.json",
+      topologyABenchmark: true,
+    });
+    assert.deepEqual(commands.tauri.args.slice(-2), ["--features", "topology-a-pilot"]);
+  });
+
   it("rejects Clerk configuration before spawning either child", () => {
     assert.deepEqual(findClerkConfiguration({ VITE_CLERK_PUBLISHABLE_KEY: "  " }), []);
     assert.throws(

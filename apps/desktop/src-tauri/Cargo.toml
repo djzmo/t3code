@@ -2,12 +2,16 @@
 name = "agent-nanoni-desktop"
 version = "1.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 publish = false
 build = "build.rs"
 
 [lib]
 path = "src/lib.rs"
+
+[features]
+default = []
+topology-a-pilot = ["dep:tauri-plugin-pilot"]
 
 [dependencies]
 dunce = "=1.0.5"
@@ -24,6 +28,7 @@ tauri = { version = "=2.11.5", default-features = false, features = [
 ] }
 tauri-plugin-dialog = "=2.7.2"
 tauri-plugin-opener = "=2.5.4"
+tauri-plugin-pilot = { version = "=0.7.2", default-features = false, optional = true }
 thiserror = "2.0"
 
 [target.'cfg(unix)'.dependencies]

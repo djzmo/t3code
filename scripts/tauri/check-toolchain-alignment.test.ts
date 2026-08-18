@@ -53,9 +53,9 @@ describe("Tauri toolchain alignment", () => {
   });
 
   it("keeps Rust and JavaScript feature-plugin pairs complete", () => {
-    const rustPlugins = [...cargoManifest.matchAll(/^tauri-plugin-([a-z0-9-]+)\s*=/gm)].map(
-      (match) => match[1],
-    );
+    const rustPlugins = [...cargoManifest.matchAll(/^tauri-plugin-([a-z0-9-]+)\s*=/gm)]
+      .map((match) => match[1])
+      .filter((name) => name !== "pilot");
     const javascriptPlugins = Object.keys({
       ...desktopPackage.dependencies,
       ...desktopPackage.devDependencies,
@@ -64,6 +64,15 @@ describe("Tauri toolchain alignment", () => {
       .map((name) => name.slice("@tauri-apps/plugin-".length));
 
     expect(javascriptPlugins.toSorted()).toEqual(rustPlugins.toSorted());
+  });
+
+  it("pins the CLI-only debug Pilot against the repository Rust toolchain", () => {
+    expect(cargoManifest).toContain('rust-version = "1.95"');
+    expect(cargoManifest).toContain(
+      'tauri-plugin-pilot = { version = "=0.7.2", default-features = false, optional = true }',
+    );
+    expect(cargoManifest).toContain('topology-a-pilot = ["dep:tauri-plugin-pilot"]');
+    expect(packageVersion("@tauri-apps/plugin-pilot")).toBeUndefined();
   });
 
   it("keeps the app identity and main-only capability explicit", () => {

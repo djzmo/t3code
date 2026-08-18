@@ -2027,5 +2027,41 @@
       "description": "Opener scope entry.",
       "title": "OpenerScopeEntry"
     }
+  },
+  "pilot": {
+    "default_permission": {
+      "identifier": "default",
+      "description": "Default permissions for tauri-plugin-pilot (allows eval callback)",
+      "permissions": ["allow-eval-callbacks"]
+    },
+    "permissions": {
+      "allow---callback": {
+        "identifier": "allow---callback",
+        "description": "Enables the __callback command without any pre-configured scope.",
+        "commands": { "allow": ["__callback"], "deny": [] }
+      },
+      "allow-callback": {
+        "identifier": "allow-callback",
+        "description": "Enables the callback command without any pre-configured scope.",
+        "commands": { "allow": ["callback"], "deny": [] }
+      },
+      "allow-eval-callbacks": {
+        "identifier": "allow-eval-callbacks",
+        "description": "Allow the internal callback IPC commands used by the eval engine",
+        "commands": { "allow": ["callback", "__callback"], "deny": [] }
+      },
+      "deny---callback": {
+        "identifier": "deny---callback",
+        "description": "Denies the __callback command without any pre-configured scope.",
+        "commands": { "allow": [], "deny": ["__callback"] }
+      },
+      "deny-callback": {
+        "identifier": "deny-callback",
+        "description": "Denies the callback command without any pre-configured scope.",
+        "commands": { "allow": [], "deny": ["callback"] }
+      }
+    },
+    "permission_sets": {},
+    "global_scope_schema": null
   }
 }
