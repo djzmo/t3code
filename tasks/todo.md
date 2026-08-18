@@ -11,8 +11,8 @@
 
 - [x] V3-policy: tags-only baseline, product version, and remote CLI pin seed.
 - [ ] V0: Electron benchmark harness and report baseline section.
-- [ ] V1.0a: TypeScript Appendix B schemas and positive fixtures.
-- [ ] V1.0b: framing, limit, and failure fixtures.
+- [x] V1.0a: TypeScript Appendix B schemas and positive fixtures.
+- [x] V1.0b: framing, limit, and failure fixtures.
 - [ ] V1.0c: Rust crate and matching serde protocol model.
 - [ ] V1.0d: bidirectional fixture drift/round-trip tests.
 - [x] V1.0e: release-workflow guard and guard test.
