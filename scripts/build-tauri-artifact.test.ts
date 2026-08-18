@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 
 import * as NodeFS from "node:fs/promises";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -14,6 +15,7 @@ import {
   resolveNodeSidecarSourceName,
   resolveTauriBuildArguments,
   resolveTauriCliCwd,
+  resolvePinnedNodeEnvironment,
 } from "./build-tauri-artifact.ts";
 import { stageTauriResources } from "./lib/tauri-stage.ts";
 
@@ -432,6 +434,49 @@ describe("Tauri artifact orchestration", () => {
 
   it("runs the Tauri CLI from the desktop project directory", () => {
     expect(resolveTauriCliCwd("C:/repo")).toBe(NodePath.join("C:/repo", "apps/desktop"));
+  });
+
+  it("puts the pinned Node directory first even when the executable is already named node", async () => {
+    const nodeExecutable = NodePath.join("C:/bundled-runtime", "node.exe");
+    const inheritedPath = NodePath.join("C:/system-runtime", "bin");
+    const environment = await resolvePinnedNodeEnvironment(
+      "C:/repo",
+      { [process.platform === "win32" ? "Path" : "PATH"]: inheritedPath, KEEP: "yes" },
+      nodeExecutable,
+    );
+
+    expect(environment).toMatchObject({ KEEP: "yes" });
+    if (process.platform === "win32") expect(environment).not.toHaveProperty("Path");
+    expect(environment.PATH).toBe(
+      `${NodePath.dirname(nodeExecutable)}${NodePath.delimiter}${inheritedPath}`,
+    );
+  });
+
+  it("atomically creates a node shim for concurrent nonstandard runtime names", async () => {
+    const rootDir = await NodeFS.mkdtemp(NodePath.join(NodeOS.tmpdir(), "tauri-node-shim-root-"));
+    const runtimeDirectory = await NodeFS.mkdtemp(
+      NodePath.join(NodeOS.tmpdir(), "tauri-node-shim-runtime-"),
+    );
+    const nodeExecutable = NodePath.join(runtimeDirectory, "nodejs.exe");
+    await NodeFS.writeFile(nodeExecutable, "pinned-runtime");
+
+    try {
+      const [first, second] = await Promise.all([
+        resolvePinnedNodeEnvironment(rootDir, { PATH: "system" }, nodeExecutable),
+        resolvePinnedNodeEnvironment(rootDir, { PATH: "system" }, nodeExecutable),
+      ]);
+      const firstDirectory = first.PATH?.split(NodePath.delimiter)[0];
+      const secondDirectory = second.PATH?.split(NodePath.delimiter)[0];
+      expect(firstDirectory).toBe(secondDirectory);
+      expect(firstDirectory).toContain(NodePath.join(".t3", "tauri-node-shim"));
+      const shimName = process.platform === "win32" ? "node.exe" : "node";
+      expect(await NodeFS.readFile(NodePath.join(firstDirectory!, shimName), "utf8")).toBe(
+        "pinned-runtime",
+      );
+    } finally {
+      await NodeFS.rm(rootDir, { recursive: true, force: true });
+      await NodeFS.rm(runtimeDirectory, { recursive: true, force: true });
+    }
   });
 
   it("builds release artifacts by default and debug artifacts only when requested", () => {

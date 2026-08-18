@@ -2,6 +2,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - This is the explicit build-time process/filesystem boundary.
 
 import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs/promises";
 import * as NodePath from "node:path";
 import { fileURLToPath } from "node:url";
@@ -694,19 +695,61 @@ export const resolveTauriBuildArguments = (
   configOverlayPath,
 ];
 
-const resolvePinnedNodeEnvironment = async (
+export const resolvePinnedNodeEnvironment = async (
   rootDir: string,
   environment: Readonly<Record<string, string>>,
+  nodeExecutable = process.execPath,
 ): Promise<Readonly<Record<string, string>>> => {
-  if (/^node(?:js)?(?:\.exe)?$/i.test(NodePath.basename(process.execPath))) return environment;
-  const shimDirectory = NodePath.join(rootDir, ".t3/tauri-node-shim");
-  const shimPath = NodePath.join(shimDirectory, process.platform === "win32" ? "node.exe" : "node");
-  await NodeFS.mkdir(shimDirectory, { recursive: true });
-  await NodeFS.rm(shimPath, { force: true });
-  await NodeFS.link(process.execPath, shimPath);
+  let nodeDirectory = NodePath.dirname(nodeExecutable);
+  if (!/^node(?:\.exe)?$/i.test(NodePath.basename(nodeExecutable))) {
+    const executableInfo = await NodeFS.stat(nodeExecutable);
+    const shimIdentity = NodeCrypto.createHash("sha256")
+      .update(NodePath.resolve(nodeExecutable))
+      .update("\0")
+      .update(String(executableInfo.size))
+      .update("\0")
+      .update(String(executableInfo.mtimeMs))
+      .digest("hex")
+      .slice(0, 16);
+    nodeDirectory = NodePath.join(rootDir, ".t3/tauri-node-shim", shimIdentity);
+    const shimPath = NodePath.join(
+      nodeDirectory,
+      process.platform === "win32" ? "node.exe" : "node",
+    );
+    await NodeFS.mkdir(nodeDirectory, { recursive: true });
+    const temporaryShimPath = `${shimPath}.${process.pid}.${NodeCrypto.randomUUID()}.tmp`;
+    await NodeFS.copyFile(nodeExecutable, temporaryShimPath);
+    if (process.platform !== "win32") {
+      await NodeFS.chmod(temporaryShimPath, executableInfo.mode & 0o777);
+    }
+    try {
+      await NodeFS.rename(temporaryShimPath, shimPath);
+    } catch (cause) {
+      const installedShim = await NodeFS.stat(shimPath).catch(() => undefined);
+      if (!installedShim?.isFile() || installedShim.size !== executableInfo.size) throw cause;
+    } finally {
+      await NodeFS.rm(temporaryShimPath, { force: true });
+    }
+  }
+  const inheritedPath =
+    environment.PATH ??
+    (process.platform === "win32"
+      ? Object.entries(environment).find(([key]) => key.toUpperCase() === "PATH")?.[1]
+      : undefined) ??
+    process.env.PATH ??
+    "";
+  const normalizedEnvironment =
+    process.platform === "win32"
+      ? Object.fromEntries(
+          Object.entries(environment).filter(([key]) => key.toUpperCase() !== "PATH"),
+        )
+      : environment;
   return {
-    ...environment,
-    PATH: `${shimDirectory}${NodePath.delimiter}${environment.PATH ?? process.env.PATH ?? ""}`,
+    ...normalizedEnvironment,
+    PATH:
+      inheritedPath.length === 0
+        ? nodeDirectory
+        : `${nodeDirectory}${NodePath.delimiter}${inheritedPath}`,
   };
 };
 
