@@ -121,6 +121,15 @@ describe("TauriApp", () => {
     }),
   );
 
+  it("serves the cached system locale synchronously after readiness", async () => {
+    const fake = makeShell();
+    const app = TauriApp.make(fake.shell);
+
+    await Effect.runPromise(app.whenReady);
+
+    assert.strictEqual(Effect.runSync(app.systemLocale), "en-US");
+  });
+
   it.effect("returns before-quit prevention and removes scoped listeners", () =>
     Effect.gen(function* () {
       const fake = makeShell();

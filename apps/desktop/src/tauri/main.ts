@@ -1,6 +1,11 @@
 import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
+import * as NodeChildProcessSpawner from "@effect/platform-node/NodeChildProcessSpawner";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
+import * as NodePath from "@effect/platform-node/NodePath";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
-import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeStdio from "@effect/platform-node/NodeStdio";
+import * as NodeTerminal from "@effect/platform-node/NodeTerminal";
 import * as NodeOS from "node:os";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -58,8 +63,18 @@ import * as TauriPreReadyPlatform from "./app/TauriPreReadyPlatform.ts";
 import * as TauriSshCliRunner from "./app/TauriSshCliRunner.ts";
 import * as TauriWslServerTree from "./wsl/TauriWslServerTree.ts";
 import * as TauriIpcMain from "./ipc/TauriIpcMain.ts";
+import type * as DesktopIpc from "../ipc/DesktopIpc.ts";
 import * as TauriPreview from "./preview/TauriPreviewManagerStub.ts";
 import * as ManagedChildSpawner from "./process/ManagedChildSpawner.ts";
+
+const nodeSupportLayer = Layer.mergeAll(
+  NodeFileSystem.layer,
+  NodeCrypto.layer,
+  NodePath.layer,
+  NodeStdio.layer,
+  NodeTerminal.layer,
+);
+const nodeServicesLayer = Layer.provideMerge(NodeChildProcessSpawner.layer, nodeSupportLayer);
 
 export interface TauriHostPorts {
   readonly app: TauriApp.TauriShellPort;
@@ -67,6 +82,7 @@ export interface TauriHostPorts {
   readonly shell: TauriShell.TauriShellPort;
   readonly window: TauriWindow.TauriWindowPort;
   readonly registry: ManagedChildSpawner.ManagedChildRegistry;
+  readonly ipcMain?: DesktopIpc.DesktopIpcMain;
 }
 
 export interface TauriHostEnvironmentOptions {
@@ -114,7 +130,7 @@ const makeEnvironmentLayer = (
         identity: options.identity,
       });
     }),
-  ).pipe(Layer.provide(appLayer), Layer.provideMerge(NodeServices.layer));
+  ).pipe(Layer.provide(appLayer), Layer.provideMerge(nodeSupportLayer));
 
 const makeManagedChildSpawnerLayer = (registry: ManagedChildSpawner.ManagedChildRegistry) =>
   Layer.unwrap(
@@ -125,7 +141,7 @@ const makeManagedChildSpawnerLayer = (registry: ManagedChildSpawner.ManagedChild
         ManagedChildSpawner.decorateManagedChildSpawner(delegate, { registry }),
       );
     }),
-  ).pipe(Layer.provide(NodeServices.layer));
+  ).pipe(Layer.provide(nodeServicesLayer));
 
 export const makeDesktopRuntimeLayer = (options: TauriHostOptions) => {
   const tauriAppLayer =
@@ -144,7 +160,7 @@ export const makeDesktopRuntimeLayer = (options: TauriHostOptions) => {
     TauriTheme.layer,
     TauriUpdater.layer,
     TauriWindow.layer(options.ports.window),
-    TauriIpcMain.layer(),
+    TauriIpcMain.layer(options.ports.ipcMain),
   );
 
   const foundationLayer = Layer.mergeAll(
@@ -205,7 +221,7 @@ export const makeDesktopRuntimeLayer = (options: TauriHostOptions) => {
   );
   const applicationLayer = applicationCoreLayer.pipe(Layer.provideMerge(sshEnvironmentLayer));
   const runtimeLayer = applicationLayer.pipe(
-    Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(nodeSupportLayer),
     Layer.provideMerge(NodeHttpClient.layerUndici),
     Layer.provideMerge(NetService.layer),
     Layer.provideMerge(tauriElectronLayer),

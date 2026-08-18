@@ -319,10 +319,14 @@ export const make = (
   const protocolVersion = options.protocolVersion ?? JSON_RPC_VERSION;
   const hostPid = options.hostPid ?? process.pid;
   let helloPromise: Promise<TauriShellHelloResult> | undefined;
+  let helloResult: TauriShellHelloResult | undefined;
   let configuredName: string | undefined;
 
   const hello = (): Promise<TauriShellHelloResult> =>
-    (helloPromise ??= shell.hello({ protocolVersion, hostPid }));
+    (helloPromise ??= shell.hello({ protocolVersion, hostPid }).then((result) => {
+      helloResult = result;
+      return result;
+    }));
 
   const readHello = Effect.tryPromise({
     try: hello,
@@ -352,9 +356,13 @@ export const make = (
       Effect.orDie,
       Effect.map((result) => configuredName ?? result.appName),
     ),
-    systemLocale: readHello.pipe(
-      Effect.orDie,
-      Effect.map((result) => result.systemLocale),
+    systemLocale: Effect.suspend(() =>
+      helloResult === undefined
+        ? readHello.pipe(
+            Effect.orDie,
+            Effect.map((result) => result.systemLocale),
+          )
+        : Effect.succeed(helloResult.systemLocale),
     ),
     whenReady: readHello.pipe(
       Effect.asVoid,
