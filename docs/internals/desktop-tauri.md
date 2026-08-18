@@ -1,9 +1,36 @@
 # Agent Nanoni desktop shell
 
-This document records the internal Phase 0 foundation and its measurement
-protocol. It is intentionally a skeleton until the owner approves packaged
-artifact execution. No Electron/Tauri process, installer, browser, dev server,
-or benchmark was launched while preparing this document.
+This document records the internal Phase 0 foundation, acceptance evidence,
+and measurement protocol. Windows debug and unsigned release artifacts have
+been built locally. The cross-platform measurements and compatibility passes
+remain pending; a build artifact is not treated as evidence for a launch,
+smoke, or UI-compatibility requirement.
+
+## Phase 0 evidence
+
+Evidence current on 2026-08-18:
+
+| Objective | Current evidence                                                                                                                                                                                         | Remaining acceptance work                                                                                                                                            |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| V0        | Recorder and focused tests are green.                                                                                                                                                                    | Run Electron and final Tauri measurements on Windows, macOS, and Linux.                                                                                              |
+| V1.0      | Shared TypeScript/Rust protocol fixtures, release guard, toolchain alignment, and CI jobs are implemented.                                                                                               | Record a green external CI run.                                                                                                                                      |
+| V1.1      | The real desktop composition and server run under the FakeShell integration test.                                                                                                                        | Strengthen the explicit C1 spawn-path audit.                                                                                                                         |
+| V1.2      | Framing, lifecycle, native process broker, retained process identity, containment unit tests, and the real `DesktopLifecycle`/`DesktopUpdates` integration proof are implemented.                        | Complete the macOS native Quit path and three-OS containment fixtures.                                                                                               |
+| V1.3      | Invoke, push, sync boot values, navigation guards, and the external-URL allow-list have TypeScript and Rust coverage.                                                                                    | Record the integrated webview pass.                                                                                                                                  |
+| V1.4      | Shim, development loop, identity overlay, and home isolation are implemented. V1b is **not selected** because the init-script shim supplies the existing `DesktopBridge` contract without a web adapter. | Confirm that decision during the integrated UI pass and record the compatibility results.                                                                            |
+| V1.5      | Deterministic staging, payload validation, smoke harnesses, and Windows debug/release packaging are implemented.                                                                                         | Resolve the Windows bootstrap-descriptor boundary and pass normal and forced-host packaged smokes.                                                                   |
+| V1.6      | Debug and release artifact matrices are defined for all three operating systems.                                                                                                                         | Obtain a green matrix, three-webview UI evidence, and LAN/Tailscale web/mobile remote-readiness evidence.                                                            |
+| V2        | No result is claimed.                                                                                                                                                                                    | Implement and run the Topology A p50/p99, push-order, 1 MiB, reload, and failure benchmark on all three webviews.                                                    |
+| V3a       | Exact remote CLI/version pins, grammar, provenance policy, and fallback surface checks are implemented.                                                                                                  | Run the real registry/provenance check and one pinned SSH provisioning pass.                                                                                         |
+| V3b       | Boot metadata and version-skew tests are implemented.                                                                                                                                                    | Confirm all values at first evaluation in the packaged UI.                                                                                                           |
+| V4-final  | On commit `54b77d949756cbaa16616f5be03f6ff8280f4dc0`, the unsigned Windows release build produced a 10,735,104-byte executable, a 75,366,767-byte MSI, and a 48,195,106-byte NSIS installer.             | Rebuild from the final commit on all three operating systems, run smokes, boot WSL from packaged resources, and launch the AppImage on a newer Wayland distribution. |
+| V5        | This evidence ledger and the measurement schema exist.                                                                                                                                                   | Fill the final measurements, compatibility findings, V2/V3 outcomes, remote-readiness result, and timed upstream-tag merge.                                          |
+
+The current Windows runtime boundary is explicit: the Node server bootstrap is
+configured for fd 3 with optional telemetry on fd 4/fd 5, while the native
+Windows broker cannot construct Node/libuv's additional CRT descriptor table.
+Windows packaged smoke remains pending until the owner approves either a
+Windows stdin bootstrap exception or a larger native launcher.
 
 ## Identity
 
