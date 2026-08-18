@@ -7,7 +7,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
-import { JsonRpcPeer, JsonRpcPeerError } from "../rpc/JsonRpcPeer.ts";
+import { JsonRpcPeerError } from "../rpc/JsonRpcPeer.ts";
 import { RpcMethodParams, RpcMethodResults } from "../rpc/protocol.ts";
 import {
   makeBrokeredChildProcessHandle,
@@ -68,6 +68,19 @@ export type RpcProcessSpawned = RpcRegisteredProcess | RpcFastExitProcess;
 export interface RpcProcessBrokerOptions {
   /** Bounded output queues are owned by makeBrokeredChildProcessHandle. */
   readonly queueCapacity?: number;
+}
+
+/** Minimal peer surface required by the process broker adapter. */
+export interface RpcProcessPeer {
+  readonly request: (method: "process.spawn", params: unknown) => Promise<unknown>;
+  readonly notify: (
+    method: "process.input" | "process.kill" | "process.release",
+    params: unknown,
+  ) => Promise<void>;
+  readonly onNotification: (
+    method: "process.output" | "process.exit",
+    handler: (params: unknown) => void | Promise<void>,
+  ) => () => void;
 }
 
 export interface RpcProcessBroker {
@@ -155,7 +168,7 @@ const spawnFailure = (operation: string, cause: unknown): RpcProcessBrokerError 
  * response; host attempt IDs never route native events.
  */
 export const makeRpcProcessBroker = (
-  peer: JsonRpcPeer,
+  peer: RpcProcessPeer,
   options: RpcProcessBrokerOptions = {},
 ): RpcProcessBroker => {
   const ports = new Map<string, ProcessPortState>();
