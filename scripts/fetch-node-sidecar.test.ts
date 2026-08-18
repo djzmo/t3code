@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   acquireNodeSidecar,
+  extractNodeSidecarArchive,
   loadNodeSidecarConfig,
   resolveNodeSidecarArtifact,
   stripHostEnvironment,
@@ -118,6 +119,70 @@ describe("host environment isolation", () => {
 });
 
 describe("sidecar acquisition", () => {
+  it("lists and extracts Windows ZIP archives through encoded PowerShell", async () => {
+    const calls: Array<{
+      readonly file: string;
+      readonly args: ReadonlyArray<string>;
+      readonly options: { readonly env?: NodeJS.ProcessEnv };
+    }> = [];
+    const archivePath = "C:\\staging;safe\\node.zip";
+    const extractionRoot = "C:\\staging;safe\\extract root";
+    const entries = [
+      "node-v24.19.0-win-x64/",
+      "node-v24.19.0-win-x64/node.exe",
+      "node-v24.19.0-win-x64/LICENSE",
+    ];
+
+    const result = await extractNodeSidecarArchive(
+      archivePath,
+      extractionRoot,
+      "zip",
+      async (file, args, options) => {
+        calls.push({ file, args, options });
+        return { stdout: calls.length === 1 ? `${entries.join("\r\n")}\r\n` : "", stderr: "" };
+      },
+    );
+
+    expect(result).toEqual(entries);
+    expect(calls).toHaveLength(2);
+    expect(calls.map(({ file }) => file)).toEqual(["powershell.exe", "powershell.exe"]);
+    expect(calls[0]?.options.env).toMatchObject({
+      AGENT_NANONI_NODE_ARCHIVE_PATH: archivePath,
+      AGENT_NANONI_NODE_EXTRACTION_ROOT: extractionRoot,
+    });
+    for (const call of calls) {
+      expect(call.args).toContain("-EncodedCommand");
+      expect(call.args).not.toContain(archivePath);
+      expect(call.args).not.toContain(extractionRoot);
+    }
+    const encodedScript = calls[0]?.args.at(-1);
+    expect(encodedScript).toBeDefined();
+    const decodedScript = Buffer.from(encodedScript ?? "", "base64").toString("utf16le");
+    expect(decodedScript).toContain("ZipFile");
+    expect(decodedScript).not.toContain(archivePath);
+    expect(decodedScript).not.toContain(extractionRoot);
+    const extractionScript = Buffer.from(calls[1]?.args.at(-1) ?? "", "base64").toString("utf16le");
+    expect(extractionScript).toContain("Expand-Archive");
+  });
+
+  it("validates ZIP entries before invoking extraction", async () => {
+    let calls = 0;
+
+    await expect(
+      extractNodeSidecarArchive(
+        "C:\\staging\\node.zip",
+        "C:\\staging\\extract",
+        "zip",
+        async () => {
+          calls += 1;
+          return { stdout: "node-v24.19.0-win-x64/../outside\r\n", stderr: "" };
+        },
+      ),
+    ).rejects.toThrow(/unsafe archive entry/i);
+
+    expect(calls).toBe(1);
+  });
+
   it("downloads into a temporary staging directory, verifies before extraction, and moves atomically", async () => {
     const archive = new TextEncoder().encode("fixture archive bytes");
     const root = mkdtempSync(join(tmpdir(), "nanoni-node-sidecar-test-"));

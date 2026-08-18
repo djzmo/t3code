@@ -10,6 +10,23 @@ import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
 
+export type NodeSidecarCommandOptions = {
+  readonly windowsHide: boolean;
+  readonly maxBuffer: number;
+  readonly env?: NodeJS.ProcessEnv;
+};
+
+export type NodeSidecarCommandRunner = (
+  file: string,
+  args: ReadonlyArray<string>,
+  options: NodeSidecarCommandOptions,
+) => Promise<{ readonly stdout: string; readonly stderr: string }>;
+
+const runArchiveCommand: NodeSidecarCommandRunner = async (file, args, options) => {
+  const result = await execFile(file, [...args], options);
+  return { stdout: result.stdout, stderr: result.stderr };
+};
+
 export const NODE_SIDECAR_VERSION = "24.19.0";
 export const NODE_SIDECAR_NAME = "agent-nanoni-node";
 export const NODE_OVERRIDE_ENV = "AGENT_NANONI_NODE";
@@ -319,12 +336,14 @@ const isNodeError = (cause: unknown): cause is NodeJS.ErrnoException =>
 
 const assertSafeArchiveEntry = (entry: string): string => {
   const normalized = entry.replaceAll("\\", "/");
+  const parts = normalized.split("/");
+  const pathParts = normalized.endsWith("/") ? parts.slice(0, -1) : parts;
   if (
-    normalized.length === 0 ||
+    pathParts.length === 0 ||
     normalized.includes("\0") ||
     normalized.startsWith("/") ||
     /^[A-Za-z]:\//.test(normalized) ||
-    normalized.split("/").some((part) => part === "..")
+    pathParts.some((part) => part === ".." || part.length === 0)
   ) {
     throw new NodeSidecarError("unsafe-archive-entry", `Unsafe archive entry '${entry}'.`);
   }
@@ -334,17 +353,91 @@ const assertSafeArchiveEntry = (entry: string): string => {
 export const validateArchiveEntries = (entries: ReadonlyArray<string>): ReadonlyArray<string> =>
   entries.map(assertSafeArchiveEntry);
 
-const defaultExtractArchive: NodeSidecarExtractor = async (
-  archivePath,
-  extractionRoot,
-  archiveType,
-) => {
-  void archiveType;
+const ARCHIVE_COMMAND_MAX_BUFFER = 8 * 1024 * 1024;
+
+const powershellScript = (operation: "list" | "extract"): string => {
+  if (operation === "list") {
+    return [
+      "$ErrorActionPreference = 'Stop'",
+      "Add-Type -AssemblyName System.IO.Compression.FileSystem",
+      "$archive = [System.IO.Compression.ZipFile]::OpenRead($env:AGENT_NANONI_NODE_ARCHIVE_PATH)",
+      "try { foreach ($entry in $archive.Entries) { [Console]::WriteLine($entry.FullName) } } finally { $archive.Dispose() }",
+    ].join("; ");
+  }
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    "Expand-Archive -LiteralPath $env:AGENT_NANONI_NODE_ARCHIVE_PATH -DestinationPath $env:AGENT_NANONI_NODE_EXTRACTION_ROOT -Force",
+  ].join("; ");
+};
+
+const encodePowerShell = (script: string): string =>
+  Buffer.from(script, "utf16le").toString("base64");
+
+const powershellCommand = (
+  archivePath: string,
+  extractionRoot: string,
+  operation: "list" | "extract",
+): { readonly args: ReadonlyArray<string>; readonly options: NodeSidecarCommandOptions } => ({
+  args: [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-EncodedCommand",
+    encodePowerShell(powershellScript(operation)),
+  ],
+  options: {
+    windowsHide: true,
+    maxBuffer: ARCHIVE_COMMAND_MAX_BUFFER,
+    env: {
+      ...process.env,
+      AGENT_NANONI_NODE_ARCHIVE_PATH: archivePath,
+      AGENT_NANONI_NODE_EXTRACTION_ROOT: extractionRoot,
+    },
+  },
+});
+
+/**
+ * Extract a downloaded Node archive using the archive format's native tool.
+ *
+ * Windows Node releases are ZIP files. PowerShell is invoked with an encoded
+ * script and paths supplied through the child environment, so archive paths
+ * never become PowerShell source. The archive is listed and validated before
+ * `Expand-Archive` runs, preserving the traversal barrier used by tar.xz.
+ */
+export const extractNodeSidecarArchive = async (
+  archivePath: string,
+  extractionRoot: string,
+  archiveType: NodeSidecarArchiveType,
+  command: NodeSidecarCommandRunner = runArchiveCommand,
+): Promise<ReadonlyArray<string>> => {
+  if (archiveType === "zip") {
+    let listing: string;
+    try {
+      const invocation = powershellCommand(archivePath, extractionRoot, "list");
+      const listed = await command("powershell.exe", invocation.args, invocation.options);
+      listing = listed.stdout;
+    } catch (cause) {
+      throw new NodeSidecarError("extract", `Unable to inspect Node ZIP archive: ${String(cause)}`);
+    }
+    const entries = validateArchiveEntries(
+      listing.split(/\r?\n/).filter((entry) => entry.length > 0),
+    );
+    try {
+      const invocation = powershellCommand(archivePath, extractionRoot, "extract");
+      await command("powershell.exe", invocation.args, invocation.options);
+    } catch (cause) {
+      throw new NodeSidecarError("extract", `Unable to extract Node ZIP archive: ${String(cause)}`);
+    }
+    return entries;
+  }
+
   let listing: string;
   try {
-    const listed = await execFile("tar", ["-tf", archivePath], {
+    const listed = await command("tar", ["-tf", archivePath], {
       windowsHide: true,
-      maxBuffer: 8 * 1024 * 1024,
+      maxBuffer: ARCHIVE_COMMAND_MAX_BUFFER,
     });
     listing = listed.stdout;
   } catch (cause) {
@@ -354,15 +447,18 @@ const defaultExtractArchive: NodeSidecarExtractor = async (
     listing.split(/\r?\n/).filter((entry) => entry.length > 0),
   );
   try {
-    await execFile("tar", ["-xf", archivePath, "-C", extractionRoot], {
+    await command("tar", ["-xf", archivePath, "-C", extractionRoot], {
       windowsHide: true,
-      maxBuffer: 8 * 1024 * 1024,
+      maxBuffer: ARCHIVE_COMMAND_MAX_BUFFER,
     });
   } catch (cause) {
     throw new NodeSidecarError("extract", `Unable to extract Node archive: ${String(cause)}`);
   }
   return entries;
 };
+
+const defaultExtractArchive: NodeSidecarExtractor = (archivePath, extractionRoot, archiveType) =>
+  extractNodeSidecarArchive(archivePath, extractionRoot, archiveType);
 
 const verifyResponse = async (response: BinaryResponse, url: string): Promise<Uint8Array> => {
   if (!response.ok) {
