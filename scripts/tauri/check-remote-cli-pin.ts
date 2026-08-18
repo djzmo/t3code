@@ -439,6 +439,59 @@ const collectWorkspaceClosure = (
 const importSpecifierPattern =
   /(?:import\s+(?:[\s\S]*?\s+from\s+)?|export\s+[\s\S]*?\s+from\s+|import\s*\(|require\s*\()(['"])([^'"\n]+)\1/g;
 
+const stripJavaScriptComments = (source: string): string => {
+  let output = "";
+  let state: "code" | "single" | "double" | "template" | "line" | "block" = "code";
+  let escaped = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index] ?? "";
+    const next = source[index + 1] ?? "";
+    if (state === "line") {
+      if (character === "\n" || character === "\r") {
+        state = "code";
+        output += character;
+      } else output += " ";
+      continue;
+    }
+    if (state === "block") {
+      if (character === "*" && next === "/") {
+        output += "  ";
+        index += 1;
+        state = "code";
+      } else output += character === "\n" || character === "\r" ? character : " ";
+      continue;
+    }
+    if (state !== "code") {
+      output += character;
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (
+        (state === "single" && character === "'") ||
+        (state === "double" && character === '"') ||
+        (state === "template" && character === "`")
+      ) {
+        state = "code";
+      }
+      continue;
+    }
+    if (character === "/" && next === "/") {
+      output += "  ";
+      index += 1;
+      state = "line";
+    } else if (character === "/" && next === "*") {
+      output += "  ";
+      index += 1;
+      state = "block";
+    } else {
+      output += character;
+      if (character === "'") state = "single";
+      else if (character === '"') state = "double";
+      else if (character === "`") state = "template";
+    }
+  }
+  return output;
+};
+
 const resolveLocalImport = (
   rootDir: string,
   importer: string,
@@ -479,7 +532,7 @@ const collectBuildScriptGraph = (rootDir: string): ReadonlySet<string> => {
     } catch {
       continue;
     }
-    for (const match of source.matchAll(importSpecifierPattern)) {
+    for (const match of stripJavaScriptComments(source).matchAll(importSpecifierPattern)) {
       const specifier = match[2];
       if (!specifier) continue;
       const imported = resolveLocalImport(rootDir, filePath, specifier);
@@ -684,6 +737,57 @@ const gitFileAt = async (
   relativePath: string,
 ): Promise<string | undefined> => gitMay(git, ["show", `${tag}:${relativePath}`]);
 
+const gitObjectTypeAt = async (
+  git: GitRunner,
+  tag: string,
+  relativePath: string,
+): Promise<string | undefined> =>
+  (await gitMay(git, ["cat-file", "-t", `${tag}:${relativePath}`]))?.trim();
+
+const historicalImportCandidates = (importer: string, specifier: string): ReadonlyArray<string> => {
+  if (!specifier.startsWith(".")) return [];
+  const base = NodePath.posix.normalize(
+    NodePath.posix.join(NodePath.posix.dirname(importer), specifier),
+  );
+  if (base === ".." || base.startsWith("../") || NodePath.posix.isAbsolute(base)) return [];
+  return [
+    base,
+    ...[".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs"].map(
+      (extension) => `${base}${extension}`,
+    ),
+    ...["index.ts", "index.tsx", "index.mts", "index.js", "index.mjs"].map((entry) =>
+      NodePath.posix.join(base, entry),
+    ),
+  ];
+};
+
+const collectHistoricalBuildScriptGraph = async (
+  tag: string,
+  git: GitRunner,
+): Promise<ReadonlySet<string>> => {
+  const graph = new Set<string>();
+  const pending = ["apps/server/vite.config.ts", "apps/server/scripts/cli.ts"];
+  while (pending.length > 0) {
+    const relativePath = pending.pop();
+    if (!relativePath || graph.has(relativePath)) continue;
+    if ((await gitObjectTypeAt(git, tag, relativePath)) !== "blob") continue;
+    const source = await gitFileAt(git, tag, relativePath);
+    if (source === undefined) continue;
+    graph.add(relativePath);
+    for (const match of stripJavaScriptComments(source).matchAll(importSpecifierPattern)) {
+      const specifier = match[2];
+      if (!specifier) continue;
+      for (const candidate of historicalImportCandidates(relativePath, specifier)) {
+        if ((await gitObjectTypeAt(git, tag, candidate)) === "blob") {
+          pending.push(candidate);
+          break;
+        }
+      }
+    }
+  }
+  return graph;
+};
+
 const compareClosureToTag = async (
   rootDir: string,
   tag: string,
@@ -749,7 +853,6 @@ const historicalClosurePaths = async (
     "apps/server",
     "packages",
     "infra",
-    "scripts",
     "vite.config.ts",
   ]);
   const currentPackagePaths = [...closure.files]
@@ -760,12 +863,12 @@ const historicalClosurePaths = async (
     if (
       path.startsWith("apps/server/") ||
       currentPackagePaths.some((prefix) => path.startsWith(`${prefix}/`)) ||
-      path === "vite.config.ts" ||
-      path.startsWith("scripts/")
+      path === "vite.config.ts"
     ) {
       paths.add(path);
     }
   }
+  for (const path of await collectHistoricalBuildScriptGraph(tag, git)) paths.add(path);
   const patchText = await gitFileAt(git, tag, "pnpm-lock.yaml");
   if (patchText !== undefined) {
     try {

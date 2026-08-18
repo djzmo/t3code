@@ -118,12 +118,40 @@ const baselineGit = (root: string): GitRunner => {
     if (args[0] === "rev-parse" && args[1] === "--is-shallow-repository") return "false\n";
     if (args[0] === "rev-parse" && args[1] === "--verify") return "deadbeef\n";
     if (args[0] === "merge-base") return "";
+    if (args[0] === "cat-file" && args[1] === "-t") {
+      const relativePath = args[2]?.slice(args[2].indexOf(":") + 1);
+      if (relativePath !== undefined && baseline.has(relativePath)) return "blob\n";
+      if (
+        relativePath !== undefined &&
+        [...baseline.keys()].some((path) => path.startsWith(`${relativePath}/`))
+      ) {
+        return "tree\n";
+      }
+      throw new Error(`missing ${relativePath}`);
+    }
     if (args[0] === "ls-tree") {
-      return [...baseline.keys()].filter((path) => path.endsWith("/package.json")).join("\n");
+      const separator = args.indexOf("--");
+      const prefixes = separator < 0 ? [] : args.slice(separator + 1);
+      return [...baseline.keys()]
+        .filter(
+          (path) =>
+            prefixes.length === 0 ||
+            prefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`)),
+        )
+        .join("\n");
     }
     if (args[0] === "show") {
       const relativePath = args[1]?.slice(args[1].indexOf(":") + 1);
       const value = relativePath === undefined ? undefined : baseline.get(relativePath);
+      if (
+        value === undefined &&
+        relativePath !== undefined &&
+        [...baseline.keys()].some((path) => path.startsWith(`${relativePath}/`))
+      ) {
+        return [...baseline.keys()]
+          .filter((path) => path.startsWith(`${relativePath}/`))
+          .join("\n");
+      }
       if (value === undefined) throw new Error(`missing ${relativePath}`);
       return value;
     }
@@ -303,6 +331,64 @@ describe("remote CLI pin closure", () => {
       ),
     );
     await expect(check(root)).resolves.toMatchObject({ packageVersion: "0.0.1" });
+  });
+
+  it("ignores changed scripts outside the pinned tag's reachable build graph", async () => {
+    const root = fixture();
+    write(root, "scripts/dev-runner.ts", "export const mode = 'upstream';\n");
+    const git = baselineGit(root);
+    write(root, "scripts/dev-runner.ts", "export const mode = 'tauri';\n");
+
+    await expect(
+      verifyRemoteCliPin({
+        rootDir: root,
+        git,
+        distIntegrity: INTEGRITY,
+        attestation: { attestations: [] },
+        verifyExecutableSurface: async () => undefined,
+      }),
+    ).resolves.toMatchObject({ packageVersion: "0.0.1" });
+  });
+
+  it("resolves historical extensionless directory imports through an index blob", async () => {
+    const root = fixture();
+    write(root, "apps/server/vite.config.ts", "import '../../scripts/lib';\n");
+    write(root, "apps/server/scripts/cli.ts", "export const cli = true;\n");
+    write(root, "scripts/lib/index.ts", "export const indexed = true;\n");
+    const git = baselineGit(root);
+    write(root, "scripts/lib/index.ts", "export const indexed = false;\n");
+
+    await expect(
+      verifyRemoteCliPin({
+        rootDir: root,
+        git,
+        distIntegrity: INTEGRITY,
+        attestation: { attestations: [] },
+        verifyExecutableSurface: async () => undefined,
+      }),
+    ).rejects.toMatchObject<RemoteCliPinError>({ code: "server-closure-diff" });
+  });
+
+  it("tracks reachable build imports separated by JavaScript comments", async () => {
+    const root = fixture();
+    write(
+      root,
+      "apps/server/vite.config.ts",
+      "import/* graph comments are valid here */ '../../scripts/lib/build.ts';\n",
+    );
+    write(root, "apps/server/scripts/cli.ts", "export const cli = true;\n");
+    const git = baselineGit(root);
+    write(root, "scripts/lib/build.ts", "export const build = false;\n");
+
+    await expect(
+      verifyRemoteCliPin({
+        rootDir: root,
+        git,
+        distIntegrity: INTEGRITY,
+        attestation: { attestations: [] },
+        verifyExecutableSurface: async () => undefined,
+      }),
+    ).rejects.toMatchObject<RemoteCliPinError>({ code: "server-closure-diff" });
   });
 
   it("rejects shallow repositories before trusting a tag", async () => {
