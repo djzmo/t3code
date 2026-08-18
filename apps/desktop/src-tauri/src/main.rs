@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::env;
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -58,6 +59,9 @@ struct BridgeRuntimeInner {
     app_event_dispatcher: Mutex<Option<Arc<AppEventDispatcher>>>,
     desktop_events: Mutex<Option<TauriDesktopEvents>>,
     sidecar: Mutex<Option<Arc<SidecarSupervisor>>>,
+    smoke_backend_ready: AtomicBool,
+    smoke_roundtrip_seen: AtomicBool,
+    smoke_completion_scheduled: AtomicBool,
 }
 
 #[derive(Clone, Default)]
@@ -159,6 +163,59 @@ impl BridgeRuntime {
         if let Ok(mut sidecar) = self.0.sidecar.lock() {
             *sidecar = None;
         }
+    }
+
+    fn mark_smoke_backend_ready(&self) {
+        if env::var_os("AGENT_NANONI_SMOKE").as_deref() != Some(std::ffi::OsStr::new("1")) {
+            return;
+        }
+        self.0.smoke_backend_ready.store(true, Ordering::Release);
+        eprintln!("AGENT_NANONI_SMOKE backend-ready");
+        self.schedule_smoke_completion_if_ready();
+    }
+
+    fn mark_smoke_roundtrip(&self) {
+        if env::var_os("AGENT_NANONI_SMOKE").as_deref() != Some(std::ffi::OsStr::new("1")) {
+            return;
+        }
+        self.0.smoke_roundtrip_seen.store(true, Ordering::Release);
+        self.schedule_smoke_completion_if_ready();
+    }
+
+    fn schedule_smoke_completion_if_ready(&self) {
+        if !self.0.smoke_backend_ready.load(Ordering::Acquire)
+            || !self.0.smoke_roundtrip_seen.load(Ordering::Acquire)
+            || self
+                .0
+                .smoke_completion_scheduled
+                .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+
+        let runtime = self.clone();
+        let _ = thread::Builder::new()
+            .name("nanoni-smoke-completion".to_owned())
+            .spawn(move || {
+                eprintln!("AGENT_NANONI_SMOKE first-roundtrip");
+                if env::var_os("AGENT_NANONI_SMOKE_KILL_HOST").as_deref()
+                    == Some(std::ffi::OsStr::new("1"))
+                {
+                    match runtime.sidecar().and_then(|sidecar| {
+                        sidecar.terminate_for_smoke().map_err(|e| e.to_string())
+                    }) {
+                        Ok(pid) => eprintln!("AGENT_NANONI_SMOKE host-kill-requested pid={pid}"),
+                        Err(error) => eprintln!("AGENT_NANONI_SMOKE host-kill-failed: {error}"),
+                    }
+                } else {
+                    eprintln!("AGENT_NANONI_SMOKE clean-exit-requested");
+                    if let Err(error) = runtime
+                        .dispatch_app_event(AppEvent::Host(HostNotification::Exit { code: 0 }))
+                    {
+                        eprintln!("AGENT_NANONI_SMOKE clean-exit-failed: {error}");
+                    }
+                }
+            });
     }
 }
 
@@ -464,25 +521,8 @@ impl<R: tauri::Runtime> ShellPlatform for TauriShellPlatform<R> {
             _ => return Err(format!("unsupported window notification: {method:?}")),
         };
         result?;
-        if is_window_show
-            && env::var_os("AGENT_NANONI_SMOKE").as_deref() == Some(std::ffi::OsStr::new("1"))
-        {
-            eprintln!("AGENT_NANONI_SMOKE backend-ready");
-            if env::var_os("AGENT_NANONI_SMOKE_KILL_HOST").as_deref()
-                == Some(std::ffi::OsStr::new("1"))
-            {
-                let pid = self
-                    .runtime
-                    .sidecar()?
-                    .terminate_for_smoke()
-                    .map_err(|error| error.to_string())?;
-                eprintln!("AGENT_NANONI_SMOKE host-kill-requested pid={pid}");
-            } else {
-                eprintln!("AGENT_NANONI_SMOKE clean-exit-requested");
-                let _ = self
-                    .runtime
-                    .dispatch_app_event(AppEvent::Host(HostNotification::Exit { code: 0 }))?;
-            }
+        if is_window_show {
+            self.runtime.mark_smoke_backend_ready();
         }
         Ok(())
     }
@@ -562,14 +602,19 @@ impl<R: tauri::Runtime> ShellPlatform for TauriShellPlatform<R> {
                 .map_err(|error| error.to_string()),
             AppEffect::FocusMainWindow { steal } => self.app_focus(AppFocusParams { steal }),
             AppEffect::ShowHostError => {
-                self.app
-                    .dialog()
-                    .message(
-                        "The Agent Nanoni host exited unexpectedly. Managed processes were stopped.",
-                    )
-                    .title("Agent Nanoni host error")
-                    .kind(MessageDialogKind::Error)
-                    .blocking_show();
+                // The forced-host smoke must remain unattended so it can
+                // observe cleanup and the lifecycle continuation. Production
+                // still surfaces the native error dialog.
+                if env::var_os("AGENT_NANONI_SMOKE").as_deref() != Some(std::ffi::OsStr::new("1")) {
+                    self.app
+                        .dialog()
+                        .message(
+                            "The Agent Nanoni host exited unexpectedly. Managed processes were stopped.",
+                        )
+                        .title("Agent Nanoni host error")
+                        .kind(MessageDialogKind::Error)
+                        .blocking_show();
+                }
                 Ok(())
             }
             AppEffect::Run(continuation) => {
@@ -634,7 +679,7 @@ fn host_invoke(
 ) -> Result<Value, String> {
     let application_url = state.application_url()?;
     let current_url = webview.url().map_err(|error| error.to_string())?;
-    dispatch_host_invoke(
+    let response = dispatch_host_invoke(
         HostInvokeContext {
             webview_label: webview.label(),
             application_url: &application_url,
@@ -643,8 +688,9 @@ fn host_invoke(
         HostInvokeRequest { channel, payload },
         state.inner(),
     )
-    .map(|response| response.result)
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    state.mark_smoke_roundtrip();
+    Ok(response.result)
 }
 
 #[tauri::command]
@@ -838,6 +884,17 @@ fn path_string(path: Result<PathBuf, impl std::fmt::Display>) -> String {
         .unwrap_or_default()
 }
 
+fn sidecar_compatible_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        dunce::simplified(&path).to_owned()
+    }
+    #[cfg(not(windows))]
+    {
+        path
+    }
+}
+
 fn env_path(name: &str) -> Option<PathBuf> {
     env::var_os(name)
         .filter(|value| !value.is_empty())
@@ -851,10 +908,11 @@ fn resolve_existing_path(candidates: impl IntoIterator<Item = PathBuf>) -> Optio
 fn resolve_sidecar_spec<R: tauri::Runtime>(
     app: &tauri::App<R>,
 ) -> Result<(SidecarSpawnSpec, ShellHelloResult), String> {
-    let resource_dir = app
-        .path()
-        .resource_dir()
-        .map_err(|error| error.to_string())?;
+    let resource_dir = sidecar_compatible_path(
+        app.path()
+            .resource_dir()
+            .map_err(|error| error.to_string())?,
+    );
     // A debug bundle still enables Tauri's `custom-protocol` feature and must
     // resolve packaged resources. `debug_assertions` only describes compiler
     // optimization mode; Tauri's runtime predicate distinguishes `tauri dev`.
@@ -863,7 +921,8 @@ fn resolve_sidecar_spec<R: tauri::Runtime>(
         env::current_dir().ok()
     } else {
         Some(resource_dir.clone())
-    };
+    }
+    .map(sidecar_compatible_path);
     let dev_override = |name| is_dev.then(|| env_path(name)).flatten();
     let node = dev_override("AGENT_NANONI_NODE").or_else(|| {
         let names = if cfg!(windows) {
@@ -876,7 +935,10 @@ fn resolve_sidecar_spec<R: tauri::Runtime>(
     let host_script = dev_override("AGENT_NANONI_HOST_ENTRY")
         .or_else(|| resolve_existing_path([resource_dir.join("host").join("host.cjs")]))
         .ok_or_else(|| "Agent Nanoni host entrypoint was not found".to_owned())?;
-    let node = node.ok_or_else(|| "Agent Nanoni Node executable was not found".to_owned())?;
+    let node = sidecar_compatible_path(
+        node.ok_or_else(|| "Agent Nanoni Node executable was not found".to_owned())?,
+    );
+    let host_script = sidecar_compatible_path(host_script);
     if !node.is_file() {
         return Err(format!(
             "Agent Nanoni Node executable is not a file: {}",
@@ -890,7 +952,19 @@ fn resolve_sidecar_spec<R: tauri::Runtime>(
         ));
     }
     let exec_path = path_string(std::env::current_exe());
-    let app_data_dir = if is_dev {
+    let smoke_home = (!is_dev
+        && env::var_os("AGENT_NANONI_SMOKE").as_deref() == Some(std::ffi::OsStr::new("1")))
+    .then(|| env_path("AGENT_NANONI_SMOKE_HOME"))
+    .flatten()
+    .map(|path| {
+        if path.is_absolute() {
+            Ok(path)
+        } else {
+            Err("AGENT_NANONI_SMOKE_HOME must be an absolute path".to_owned())
+        }
+    })
+    .transpose()?;
+    let app_data_dir = sidecar_compatible_path(if is_dev {
         env_path("T3CODE_HOME")
             .or_else(|| {
                 current_dir
@@ -898,19 +972,24 @@ fn resolve_sidecar_spec<R: tauri::Runtime>(
                     .map(|path| path.join(".t3").join("tauri"))
             })
             .ok_or_else(|| "Agent Nanoni development home could not be resolved".to_owned())?
+    } else if let Some(smoke_home) = smoke_home {
+        smoke_home
     } else {
         app.path()
             .home_dir()
             .map_err(|error| error.to_string())?
             .join(".agent-nanoni")
-    };
-    let log_dir = app
-        .path()
-        .app_log_dir()
-        .map_err(|error| error.to_string())?;
-    let server_root = dev_override("AGENT_NANONI_SERVER_ROOT")
-        .or_else(|| is_dev.then(|| current_dir.clone()).flatten())
-        .unwrap_or_else(|| resource_dir.join("server"));
+    });
+    let log_dir = sidecar_compatible_path(
+        app.path()
+            .app_log_dir()
+            .map_err(|error| error.to_string())?,
+    );
+    let server_root = sidecar_compatible_path(
+        dev_override("AGENT_NANONI_SERVER_ROOT")
+            .or_else(|| is_dev.then(|| current_dir.clone()).flatten())
+            .unwrap_or_else(|| resource_dir.join("server")),
+    );
     let hello = ShellHelloResult {
         app_name: app.package_info().name.clone(),
         identifier: app.config().identifier.clone(),
@@ -965,6 +1044,17 @@ fn setup_sidecar<R: tauri::Runtime>(
     runtime: &BridgeRuntime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (spec, hello) = resolve_sidecar_spec(app).map_err(std::io::Error::other)?;
+    if env::var_os("AGENT_NANONI_SMOKE").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        eprintln!(
+            "AGENT_NANONI_SMOKE sidecar node={} host={} cwd={}",
+            spec.node_executable.display(),
+            spec.host_script.display(),
+            spec.current_dir.as_deref().map_or_else(
+                || "<inherited>".to_owned(),
+                |path| path.display().to_string()
+            )
+        );
+    }
     let dispatcher = ShellDispatcher::new(
         TauriShellPlatform::new(app.handle().clone(), runtime.clone()),
         RpcProcessBroker::new(ProcessBroker::new(BrokerConfig::default())),
@@ -1135,7 +1225,7 @@ mod tests {
     use agent_nanoni_desktop::lifecycle::{Action, State};
     use serde_json::Value;
 
-    use super::{native_exit_event, transition_prevents_exit};
+    use super::{native_exit_event, sidecar_compatible_path, transition_prevents_exit};
 
     #[test]
     fn capability_is_scoped_to_main_webview() {
@@ -1208,5 +1298,16 @@ mod tests {
             effects: Vec::new(),
         };
         assert!(!transition_prevents_exit(&authorized));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sidecar_paths_do_not_expose_windows_verbatim_prefixes_to_node() {
+        assert_eq!(
+            sidecar_compatible_path(std::path::PathBuf::from(
+                r"\\?\D:\agent-nanoni\host\host.cjs"
+            )),
+            std::path::PathBuf::from(r"D:\agent-nanoni\host\host.cjs")
+        );
     }
 }

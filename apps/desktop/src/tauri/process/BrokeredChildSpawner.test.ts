@@ -65,6 +65,7 @@ describe("BrokeredChildSpawner", () => {
           cwd: "C:\\work",
           env: { KEEP: "yes", DROP: undefined },
           extendEnv: true,
+          shell: false,
           stdin: "pipe",
           stdout: "ignore",
           stderr: { stream: "pipe" },
@@ -208,6 +209,7 @@ describe("BrokeredChildSpawner", () => {
       const unsafe = [
         command({ detached: true }),
         command({ shell: true }),
+        command({ shell: "/bin/sh" }),
         command({ stdin: "inherit" }),
         command({ stdout: "overlapped" }),
         command({ additionalFds: { fd3: { type: "input", stream: Stream.empty } } }),

@@ -13,6 +13,7 @@ name = "agent-nanoni-desktop"
 version = "1.0.0"
 dependencies = [
  "command-fds",
+ "dunce",
  "libproc",
  "muda",
  "nix",

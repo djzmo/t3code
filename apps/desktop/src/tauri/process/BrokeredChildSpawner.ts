@@ -110,7 +110,7 @@ const toSpawnRequest = (
   options: BrokeredChildSpawnerOptions,
 ): BrokerSpawnRequest => {
   const commandOptions = command.options;
-  if (commandOptions.shell !== undefined) {
+  if (commandOptions.shell !== undefined && commandOptions.shell !== false) {
     throw invalid("spawn", "shell execution is not supported by the process broker");
   }
   if (commandOptions.detached === true) {

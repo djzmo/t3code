@@ -4,7 +4,7 @@
 //! process and registration identifiers and keeps the opaque native tokens in
 //! private maps.
 
-use super::broker::{AdditionalFdDirection, AdditionalFdSpec};
+use super::broker::{AdditionalFdDirection, AdditionalFdSpec, StdioMode};
 use super::{
     BrokerError, BrokerEvent, ProcessBroker, ProcessKind as NativeProcessKind, RegistrationToken,
     ReleaseOutcome, SpawnRequest, StdinOutcome,
@@ -64,6 +64,7 @@ struct ProcessState {
     attempts: HashMap<String, String>,
     processes: HashMap<String, ProcessRecord>,
     registrations: HashMap<String, String>,
+    exited_processes: HashMap<String, String>,
     next_process_id: u64,
     next_registration_id: u64,
 }
@@ -275,6 +276,16 @@ impl RpcProcessBroker {
         &mut self,
         params: ProcessTokenParams,
     ) -> Result<ReleaseOutcome, RpcAdapterError> {
+        {
+            let mut state = lock_state(&self.state);
+            if let Some(exited_registration_id) = state.exited_processes.get(&params.process_id) {
+                if exited_registration_id != &params.registration_id {
+                    return Err(RpcAdapterError::UnknownRegistration(params.registration_id));
+                }
+                state.exited_processes.remove(&params.process_id);
+                return Ok(ReleaseOutcome::AlreadyExited);
+            }
+        }
         let record = self.process_record(&params.process_id, &params.registration_id)?;
         let registration = record
             .broker_registration
@@ -324,6 +335,7 @@ impl RpcProcessBroker {
         state.attempts.clear();
         state.processes.clear();
         state.registrations.clear();
+        state.exited_processes.clear();
         cleanup_error.map_or(Ok(()), |error| Err(error.into()))
     }
 
@@ -402,6 +414,9 @@ fn event_to_notification(
             state.attempts.remove(&record.attempt_id);
             if let Some(registration_id) = &record.registration_id {
                 state.registrations.remove(registration_id);
+                state
+                    .exited_processes
+                    .insert(record.process_id.clone(), registration_id.clone());
             }
             state.processes.remove(&record.process_id);
             Ok(RpcNotification {
@@ -422,17 +437,6 @@ fn spawn_request(params: &ProcessSpawnParams) -> Result<SpawnRequest, RpcAdapter
         return Err(RpcAdapterError::InvalidRequest(
             "attemptId and command must be non-empty".to_owned(),
         ));
-    }
-    for (name, mode) in [
-        ("stdin", params.stdin),
-        ("stdout", params.stdout),
-        ("stderr", params.stderr),
-    ] {
-        if mode != ProcessStreamMode::Pipe {
-            return Err(RpcAdapterError::InvalidRequest(format!(
-                "{name} mode null is unsupported by the native broker"
-            )));
-        }
     }
     let mut additional_fds = Vec::with_capacity(params.additional_fds.len());
     for descriptor in &params.additional_fds {
@@ -466,7 +470,17 @@ fn spawn_request(params: &ProcessSpawnParams) -> Result<SpawnRequest, RpcAdapter
         .map(|(key, value)| (OsString::from(key), OsString::from(value)))
         .collect();
     request.additional_fds = additional_fds;
+    request.stdin = native_stdio_mode(params.stdin);
+    request.stdout = native_stdio_mode(params.stdout);
+    request.stderr = native_stdio_mode(params.stderr);
     Ok(request)
+}
+
+fn native_stdio_mode(mode: ProcessStreamMode) -> StdioMode {
+    match mode {
+        ProcessStreamMode::Pipe => StdioMode::Pipe,
+        ProcessStreamMode::Null => StdioMode::Null,
+    }
 }
 
 fn decode_base64(value: &str) -> Result<Vec<u8>, RpcAdapterError> {
@@ -577,13 +591,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_stream_shapes_the_native_broker_cannot_preserve() {
+    fn maps_each_rpc_stream_mode_independently() {
         let mut null_stream = params("ignored", &[]);
         null_stream.stdin = ProcessStreamMode::Null;
-        assert!(matches!(
-            spawn_request(&null_stream),
-            Err(RpcAdapterError::InvalidRequest(_))
-        ));
+        null_stream.stderr = ProcessStreamMode::Null;
+        let request = spawn_request(&null_stream).expect("null stdio modes are supported");
+        assert_eq!(request.stdin, StdioMode::Null);
+        assert_eq!(request.stdout, StdioMode::Pipe);
+        assert_eq!(request.stderr, StdioMode::Null);
 
         let mut extra_fd = params("ignored", &[]);
         extra_fd.additional_fds.push(ProcessAdditionalFd {
@@ -723,6 +738,79 @@ mod tests {
             }
         }
         assert!(saw_exit);
+    }
+
+    #[test]
+    fn releases_exact_registration_once_after_exit_event() {
+        #[cfg(windows)]
+        let request = params("cmd", &["/D", "/C", "exit", "0"]);
+        #[cfg(not(windows))]
+        let request = params("true", &[]);
+
+        let mut adapter = RpcProcessBroker::new(ProcessBroker::new(BrokerConfig::default()));
+        let spawned = adapter.spawn(request).expect("fixture process spawns");
+        let registration_id = spawned
+            .registration_id
+            .0
+            .clone()
+            .expect("fixture remains registered");
+
+        let event = adapter
+            .next_event()
+            .expect("fixture emits an exit")
+            .expect("exit maps to RPC");
+        assert!(matches!(event.params, Some(RpcParams::ProcessExit(_))));
+
+        let params = ProcessTokenParams {
+            process_id: spawned.process_id.clone(),
+            registration_id: registration_id.clone(),
+        };
+        assert_eq!(
+            adapter.release(params.clone()),
+            Ok(ReleaseOutcome::AlreadyExited)
+        );
+        assert_eq!(
+            adapter.release(params),
+            Err(RpcAdapterError::UnknownProcess(spawned.process_id))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_registration_for_exited_process() {
+        #[cfg(windows)]
+        let request = params("cmd", &["/D", "/C", "exit", "0"]);
+        #[cfg(not(windows))]
+        let request = params("true", &[]);
+
+        let mut adapter = RpcProcessBroker::new(ProcessBroker::new(BrokerConfig::default()));
+        let spawned = adapter.spawn(request).expect("fixture process spawns");
+        let registration_id = spawned
+            .registration_id
+            .0
+            .expect("fixture remains registered");
+
+        let event = adapter
+            .next_event()
+            .expect("fixture emits an exit")
+            .expect("exit maps to RPC");
+        assert!(matches!(event.params, Some(RpcParams::ProcessExit(_))));
+
+        assert_eq!(
+            adapter.release(ProcessTokenParams {
+                process_id: spawned.process_id.clone(),
+                registration_id: "registration-wrong".to_owned(),
+            }),
+            Err(RpcAdapterError::UnknownRegistration(
+                "registration-wrong".to_owned()
+            ))
+        );
+        assert_eq!(
+            adapter.release(ProcessTokenParams {
+                process_id: spawned.process_id,
+                registration_id,
+            }),
+            Ok(ReleaseOutcome::AlreadyExited)
+        );
     }
 
     #[cfg(unix)]

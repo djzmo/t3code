@@ -75,6 +75,13 @@ pub enum AdditionalFdDirection {
     Output,
 }
 
+/// How a child's standard stream is connected to the broker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdioMode {
+    Pipe,
+    Null,
+}
+
 /// A descriptor inherited by the child and exposed through broker events or
 /// `process.input` writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -136,6 +143,9 @@ pub struct SpawnRequest {
     /// Additional descriptors inherited by the child.  Descriptor numbers
     /// must be >= 3 and unique; stdio is configured separately above.
     pub additional_fds: Vec<AdditionalFdSpec>,
+    pub stdin: StdioMode,
+    pub stdout: StdioMode,
+    pub stderr: StdioMode,
 }
 
 impl SpawnRequest {
@@ -151,6 +161,9 @@ impl SpawnRequest {
             detached: false,
             shell: None,
             additional_fds: Vec::new(),
+            stdin: StdioMode::Pipe,
+            stdout: StdioMode::Pipe,
+            stderr: StdioMode::Pipe,
         }
     }
 
@@ -225,7 +238,8 @@ impl ExitStatusInfo {
 }
 
 /// Events emitted by a managed child.  `sequence` is monotonic across both
-/// streams and the exit notification, so the renderer has one total order.
+/// streams and the exit notification for that child, so the renderer has one
+/// total order per process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrokerEvent {
     Output {
@@ -506,9 +520,9 @@ impl ProcessBroker {
         for (key, value) in &request.env {
             command.env(key, value);
         }
-        command.stdin(Stdio::piped());
-        command.stdout(Stdio::piped());
-        command.stderr(Stdio::piped());
+        command.stdin(request.stdin.into_stdio());
+        command.stdout(request.stdout.into_stdio());
+        command.stderr(request.stderr.into_stdio());
 
         #[cfg(unix)]
         // Keep every brokered direct child as the leader of its own process
@@ -1007,6 +1021,15 @@ impl ProcessBroker {
     }
 }
 
+impl StdioMode {
+    fn into_stdio(self) -> Stdio {
+        match self {
+            Self::Pipe => Stdio::piped(),
+            Self::Null => Stdio::null(),
+        }
+    }
+}
+
 #[cfg(test)]
 struct RegistrationBarrier {
     reached: Mutex<bool>,
@@ -1159,7 +1182,7 @@ impl EventQueue {
 }
 
 struct EventSequencer {
-    next_assigned: AtomicU64,
+    next_by_attempt: Mutex<HashMap<AttemptToken, u64>>,
     emit_lock: Mutex<()>,
     events: Arc<EventQueue>,
 }
@@ -1167,10 +1190,7 @@ struct EventSequencer {
 impl EventSequencer {
     fn new(events: Arc<EventQueue>) -> Self {
         Self {
-            // The host-side BrokeredChildProcess contract is zero-based.  A
-            // one-based first event is treated as a dropped frame and closes
-            // the process handle before any output can be consumed.
-            next_assigned: AtomicU64::new(0),
+            next_by_attempt: Mutex::new(HashMap::new()),
             emit_lock: Mutex::new(()),
             events,
         }
@@ -1181,9 +1201,24 @@ impl EventSequencer {
         // lock were released while a full queue applied backpressure, a later
         // stderr chunk could overtake an earlier stdout chunk.
         let _emit_guard = lock(&self.emit_lock);
-        let sequence = self.next_assigned.fetch_add(1, Ordering::Relaxed);
+        let is_exit = matches!(&event, BrokerEvent::Exit { .. });
+        let attempt_id = match &event {
+            BrokerEvent::Output { attempt_id, .. } | BrokerEvent::Exit { attempt_id, .. } => {
+                *attempt_id
+            }
+        };
+        let sequence = {
+            let mut next_by_attempt = lock(&self.next_by_attempt);
+            let next = next_by_attempt.entry(attempt_id).or_default();
+            let sequence = *next;
+            *next = next.saturating_add(1);
+            sequence
+        };
         let event = with_sequence(event, sequence);
         let _ = self.events.push(event);
+        if is_exit {
+            lock(&self.next_by_attempt).remove(&attempt_id);
+        }
     }
 }
 
@@ -1601,6 +1636,120 @@ mod tests {
             .expect("attempt remains registerable");
         assert!(outcome.registration_id.is_none());
         assert!(outcome.exited.is_some());
+    }
+
+    #[test]
+    fn null_stdin_does_not_retain_a_writer() {
+        let broker =
+            ProcessBroker::with_identity_backend(BrokerConfig::default(), TestIdentityBackend);
+        let mut request = long_running();
+        request.stdin = StdioMode::Null;
+        let spawned = broker.spawn(request).expect("child should spawn");
+
+        assert_eq!(
+            broker
+                .write_stdin(spawned.attempt_id, b"ignored")
+                .expect("null stdin is a valid stream mode"),
+            StdinOutcome::Closed
+        );
+        assert_eq!(
+            broker.cancel(spawned.attempt_id),
+            Ok(ReleaseOutcome::Terminated)
+        );
+    }
+
+    #[test]
+    fn null_output_does_not_emit_a_stream_event() {
+        let broker =
+            ProcessBroker::with_identity_backend(BrokerConfig::default(), TestIdentityBackend);
+        let stream = broker.events();
+        let mut request = output_probe();
+        request.stderr = StdioMode::Null;
+        let spawned = broker.spawn(request).expect("child should spawn");
+
+        let first = stream.next().expect("piped stdout should emit");
+        assert!(matches!(
+            first,
+            BrokerEvent::Output {
+                stream: OutputStream::Stdout,
+                ..
+            }
+        ));
+        let second = stream.next().expect("child should emit exit");
+        assert!(matches!(second, BrokerEvent::Exit { .. }));
+        assert!(stream.try_next().is_none());
+        let registration = broker
+            .register(spawned.attempt_id)
+            .expect("exited child remains registerable");
+        assert!(registration.registration_id.is_none());
+        assert!(registration.exited.is_some());
+    }
+
+    fn output_probe() -> SpawnRequest {
+        #[cfg(windows)]
+        {
+            request("cmd", &["/C", "echo stdout & echo stderr 1>&2"])
+        }
+        #[cfg(not(windows))]
+        {
+            request("sh", &["-c", "printf stdout; printf stderr >&2"])
+        }
+    }
+
+    #[test]
+    fn concurrent_children_start_output_sequences_at_zero() {
+        let broker =
+            ProcessBroker::with_identity_backend(BrokerConfig::default(), TestIdentityBackend);
+        let stream = broker.events();
+        let first = broker
+            .spawn(output_probe())
+            .expect("first output child should spawn");
+        broker
+            .register(first.attempt_id)
+            .expect("first output child should register");
+        let second = broker
+            .spawn(output_probe())
+            .expect("second output child should spawn");
+        broker
+            .register(second.attempt_id)
+            .expect("second output child should register");
+        let attempts = [first.attempt_id, second.attempt_id];
+        let mut sequences = HashMap::<AttemptToken, Vec<u64>>::new();
+        let mut exited = HashSet::new();
+
+        while exited.len() < attempts.len() {
+            let event = stream.next().expect("children should emit events");
+            match event {
+                BrokerEvent::Output {
+                    attempt_id,
+                    sequence,
+                    ..
+                } => {
+                    sequences.entry(attempt_id).or_default().push(sequence);
+                }
+                BrokerEvent::Exit {
+                    attempt_id,
+                    sequence,
+                    ..
+                } => {
+                    sequences.entry(attempt_id).or_default().push(sequence);
+                    exited.insert(attempt_id);
+                }
+            }
+        }
+
+        for attempt_id in attempts {
+            let sequence = sequences
+                .remove(&attempt_id)
+                .expect("each child should have emitted events");
+            assert!(
+                sequence.len() >= 2,
+                "each output probe should emit stdout, stderr, and exit: {sequence:?}"
+            );
+            for (expected, actual) in sequence.into_iter().enumerate() {
+                assert_eq!(actual, expected as u64);
+            }
+        }
     }
 
     #[test]

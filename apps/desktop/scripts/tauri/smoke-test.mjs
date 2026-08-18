@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs/promises";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -9,6 +11,9 @@ const desktopDirectory = NodePath.resolve(scriptDirectory, "../..");
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_READY_PATTERN = /(?:backend[ ._-]+ready|shell\.hello|nanoni\.phase0\.echo)/i;
+
+export const hasRequiredSmokeReadiness = (output, readyPattern = DEFAULT_READY_PATTERN) =>
+  readyPattern.test(output) && output.includes("AGENT_NANONI_SMOKE first-roundtrip");
 
 const parseArguments = (argumentsList) => {
   const options = {
@@ -52,6 +57,8 @@ const parseArguments = (argumentsList) => {
   if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs <= 0) {
     throw new Error("Smoke timeout must be a positive integer.");
   }
+  options.binary = NodePath.resolve(options.binary);
+  options.cwd = NodePath.resolve(options.cwd);
   return options;
 };
 
@@ -78,79 +85,106 @@ const killCapturedProcess = (child, signal) => {
 };
 
 const runSmoke = async (options) => {
-  const output = [];
-  const child = NodeChildProcess.spawn(options.binary, options.childArguments, {
-    cwd: options.cwd,
-    detached: process.platform !== "win32",
-    windowsHide: true,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      AGENT_NANONI_SMOKE: "1",
-      ...(options.killHost ? { AGENT_NANONI_SMOKE_KILL_HOST: "1" } : {}),
-    },
-  });
-
-  const append = (chunk) => {
-    const text = chunk.toString();
-    output.push(text);
-    if (output.length > 200) output.shift();
-  };
-  child.stdout.on("data", append);
-  child.stderr.on("data", append);
-
-  let ready = false;
-  let exited = false;
-  let exitCode = null;
-  let exitSignal = null;
-  const exitedPromise = new Promise((resolve) => {
-    child.once("exit", (code, signal) => {
-      exited = true;
-      exitCode = code;
-      exitSignal = signal;
-      resolve();
+  const configuredSmokeHome = process.env.AGENT_NANONI_SMOKE_HOME;
+  const smokeHome =
+    configuredSmokeHome ??
+    (await NodeFS.mkdtemp(NodePath.join(NodeOS.tmpdir(), "agent-nanoni-smoke-")));
+  try {
+    const output = [];
+    let exited = false;
+    let spawnError = null;
+    const child = NodeChildProcess.spawn(options.binary, options.childArguments, {
+      cwd: options.cwd,
+      detached: process.platform !== "win32",
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        AGENT_NANONI_SMOKE: "1",
+        AGENT_NANONI_SMOKE_HOME: smokeHome,
+        ...(options.killHost ? { AGENT_NANONI_SMOKE_KILL_HOST: "1" } : {}),
+      },
     });
-  });
-  const startedAt = Date.now();
-  while (!ready && !exited && Date.now() - startedAt < options.timeoutMs) {
-    const snapshot = output.join("");
-    ready = options.readyPattern.test(snapshot);
-    if (!ready) await new Promise((resolve) => setTimeout(resolve, 50));
-  }
 
-  if (!ready) {
-    killCapturedProcess(child, "SIGTERM");
-    await Promise.race([exitedPromise, new Promise((resolve) => setTimeout(resolve, 2_000))]);
-    throw new Error(
-      `Tauri smoke did not reach backend readiness within ${options.timeoutMs}ms.\n${output.join("")}`,
+    const append = (chunk) => {
+      const text = chunk.toString();
+      output.push(text);
+      if (output.length > 200) output.shift();
+    };
+    child.stdout.on("data", append);
+    child.stderr.on("data", append);
+    child.once("error", (error) => {
+      spawnError = error;
+      exited = true;
+    });
+
+    let ready = false;
+    let exitCode = null;
+    let exitSignal = null;
+    const exitedPromise = new Promise((resolve) => {
+      child.once("exit", (code, signal) => {
+        exited = true;
+        exitCode = code;
+        exitSignal = signal;
+        resolve();
+      });
+    });
+    const startedAt = Date.now();
+    while (!ready && !exited && Date.now() - startedAt < options.timeoutMs) {
+      const snapshot = output.join("");
+      ready = hasRequiredSmokeReadiness(snapshot, options.readyPattern);
+      if (!ready) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    if (!ready) {
+      killCapturedProcess(child, "SIGTERM");
+      await Promise.race([exitedPromise, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+      throw new Error(
+        spawnError !== null
+          ? `Tauri smoke process failed to start: ${spawnError.message}`
+          : `Tauri smoke did not reach backend readiness within ${options.timeoutMs}ms.\n${output.join("")}`,
+      );
+    }
+
+    // The app consumes the smoke environment only after backend readiness. The
+    // normal path asks the lifecycle to exit cleanly; the forced path kills only
+    // the retained host child and lets the shell prove managed-child cleanup.
+    await Promise.race([exitedPromise, new Promise((resolve) => setTimeout(resolve, 10_000))]);
+    if (!exited) {
+      killCapturedProcess(child, "SIGKILL");
+      throw new Error(
+        `Tauri smoke process did not exit after readiness (pid ${child.pid ?? "?"}).`,
+      );
+    }
+
+    if (!options.killHost && exitCode !== 0) {
+      throw new Error(`Tauri smoke exited with code ${exitCode}.\n${output.join("")}`);
+    }
+
+    const fullOutput = output.join("");
+    if (
+      options.killHost &&
+      !fullOutput.includes("AGENT_NANONI_SMOKE no-orphans: host-killed cleanup-complete")
+    ) {
+      throw new Error(
+        `Forced-host smoke exited without a successful no-orphans receipt.\n${fullOutput}`,
+      );
+    }
+    process.stdout.write(
+      `Tauri smoke passed (${options.killHost ? "forced-kill" : "normal"}); pid=${child.pid ?? "?"}.\n`,
     );
+  } finally {
+    if (configuredSmokeHome === undefined) {
+      await NodeFS.rm(smokeHome, { recursive: true, force: true });
+    }
   }
-
-  // The app consumes the smoke environment only after backend readiness. The
-  // normal path asks the lifecycle to exit cleanly; the forced path kills only
-  // the retained host child and lets the shell prove managed-child cleanup.
-  await Promise.race([exitedPromise, new Promise((resolve) => setTimeout(resolve, 10_000))]);
-  if (!exited) {
-    killCapturedProcess(child, "SIGKILL");
-    throw new Error(`Tauri smoke process did not exit after readiness (pid ${child.pid ?? "?"}).`);
-  }
-
-  if (!options.killHost && exitCode !== 0) {
-    throw new Error(`Tauri smoke exited with code ${exitCode}.\n${output.join("")}`);
-  }
-
-  const fullOutput = output.join("");
-  if (options.killHost && !fullOutput.includes("AGENT_NANONI_SMOKE no-orphans: host-killed cleanup-complete")) {
-    throw new Error(`Forced-host smoke exited without a successful no-orphans receipt.\n${fullOutput}`);
-  }
-  process.stdout.write(
-    `Tauri smoke passed (${options.killHost ? "forced-kill" : "normal"}); pid=${child.pid ?? "?"}.\n`,
-  );
 };
 
-try {
-  await runSmoke(parseArguments(process.argv.slice(2)));
-} catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
+if (import.meta.main) {
+  try {
+    await runSmoke(parseArguments(process.argv.slice(2)));
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  }
 }
