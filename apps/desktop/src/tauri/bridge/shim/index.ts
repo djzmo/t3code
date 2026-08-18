@@ -1,4 +1,5 @@
 export {
+  createDefaultNanoniInitScript,
   createNanoniInitScript,
   DEFAULT_EVENTS_COMMAND,
   DEFAULT_INVOKE_COMMAND,

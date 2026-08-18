@@ -1,15 +1,22 @@
 #![forbid(unsafe_code)]
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use agent_nanoni_desktop::bridge::{
     DesktopEvent, HostInvokeContext, HostInvokeHandler, HostInvokeRequest, TauriDesktopEvents,
     dispatch_host_invoke, ordered_desktop_events,
 };
 use serde_json::Value;
-use tauri::{Manager, WebviewWindow, ipc::Channel};
+use tauri::{Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, ipc::Channel};
+use tauri_plugin_opener::OpenerExt;
+
+use agent_nanoni_desktop::opener::validate_external_url;
+use agent_nanoni_desktop::window::{
+    NavigationDecision, is_application_entry_url, navigation_decision, new_window_decision,
+};
 
 const PHASE_ZERO_ECHO_CHANNEL: &str = "nanoni.phase0.echo";
+const RENDERER_INIT_SCRIPT: &str = include_str!("../gen/renderer-init.js");
 
 #[derive(Default)]
 struct BridgeRuntime {
@@ -71,6 +78,15 @@ impl HostInvokeHandler for BridgeRuntime {
     }
 }
 
+fn open_external_if_safe<R: tauri::Runtime>(manager: &impl Manager<R>, raw_url: &str) {
+    let Ok(url) = validate_external_url(raw_url) else {
+        return;
+    };
+    if let Err(error) = manager.opener().open_url(url.as_str(), None::<&str>) {
+        eprintln!("failed to open external URL: {error}");
+    }
+}
+
 #[tauri::command]
 fn host_invoke(
     webview: WebviewWindow,
@@ -112,12 +128,53 @@ fn desktop_events(
 
 fn main() {
     let result = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .manage(BridgeRuntime::default())
         .setup(|app| {
-            let window = app
-                .get_webview_window("main")
-                .ok_or_else(|| "main webview window was not created".to_owned())?;
+            let expected_dev_url = app.config().build.dev_url.as_ref().map(ToString::to_string);
+            let application_url = Arc::new(Mutex::new(None::<String>));
+            let navigation_application_url = Arc::clone(&application_url);
+            let navigation_app = app.handle().clone();
+            let new_window_app = app.handle().clone();
+
+            let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+                .title("Agent Nanoni")
+                .inner_size(1280.0, 800.0)
+                .min_inner_size(960.0, 640.0)
+                .resizable(true)
+                .initialization_script(RENDERER_INIT_SCRIPT)
+                .on_navigation(move |url| {
+                    let Ok(mut application_url) = navigation_application_url.lock() else {
+                        return false;
+                    };
+                    let Some(application_url) = application_url.as_ref() else {
+                        if !is_application_entry_url(expected_dev_url.as_deref(), url.as_str()) {
+                            return false;
+                        }
+                        *application_url = Some(url.to_string());
+                        return true;
+                    };
+                    match navigation_decision(application_url, url.as_str()) {
+                        NavigationDecision::Allow => true,
+                        NavigationDecision::OpenExternal(url) => {
+                            open_external_if_safe(&navigation_app, &url);
+                            false
+                        }
+                        NavigationDecision::Block => false,
+                    }
+                })
+                .on_new_window(move |url, _features| {
+                    let decision = new_window_decision(url.as_str());
+                    if let Some(url) = decision.open_external {
+                        open_external_if_safe(&new_window_app, &url);
+                    }
+                    tauri::webview::NewWindowResponse::Deny
+                })
+                .build()?;
             let url = window.url().map_err(|error| error.to_string())?;
+            if let Ok(mut application_url) = application_url.lock() {
+                *application_url = Some(url.to_string());
+            }
             app.state::<BridgeRuntime>()
                 .set_application_url(url.to_string())?;
             Ok(())

@@ -8,17 +8,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "label": "main",
-        "title": "Agent Nanoni",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 960,
-        "minHeight": 640,
-        "resizable": true
-      }
-    ],
+    "windows": [],
     "security": {
       "capabilities": ["main"]
     }

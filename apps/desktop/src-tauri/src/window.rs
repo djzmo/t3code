@@ -132,6 +132,24 @@ fn origin_key(url: &tauri::Url) -> Option<(String, String, Option<u16>)> {
     Some((url.scheme().to_ascii_lowercase(), host, port))
 }
 
+/// Validates the first URL before it is allowed to establish the main
+/// webview's application origin. Development builds must match the configured
+/// dev server; packaged builds accept only Tauri's platform asset origins.
+#[must_use]
+pub fn is_application_entry_url(expected_dev_url: Option<&str>, candidate: &str) -> bool {
+    if let Some(expected_dev_url) = expected_dev_url {
+        return is_same_origin(expected_dev_url, candidate);
+    }
+
+    let Ok(candidate) = tauri::Url::parse(candidate) else {
+        return false;
+    };
+    matches!(
+        (candidate.scheme(), candidate.host_str()),
+        ("tauri", Some("localhost")) | ("http", Some("tauri.localhost"))
+    )
+}
+
 /// Parses and canonicalises a URL that may be opened by the system handler.
 ///
 /// Returning the canonical URL (rather than the raw string) matches
@@ -257,6 +275,21 @@ mod tests {
             "https://evil.example/"
         ));
         assert!(!is_same_origin("https://app.example/", "not a URL"));
+    }
+
+    #[test]
+    fn first_navigation_cannot_choose_a_foreign_application_origin() {
+        assert!(is_application_entry_url(
+            Some("http://127.0.0.1:5733"),
+            "http://127.0.0.1:5733/"
+        ));
+        assert!(!is_application_entry_url(
+            Some("http://127.0.0.1:5733"),
+            "https://evil.example/"
+        ));
+        assert!(is_application_entry_url(None, "tauri://localhost/"));
+        assert!(is_application_entry_url(None, "http://tauri.localhost/"));
+        assert!(!is_application_entry_url(None, "https://example.com/"));
     }
 
     #[test]

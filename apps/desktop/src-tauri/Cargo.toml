@@ -21,6 +21,7 @@ tauri = { version = "=2.11.5", default-features = false, features = [
   "x11",
   "dbus",
 ] }
+tauri-plugin-opener = "=2.5.4"
 thiserror = "2.0"
 
 [build-dependencies]

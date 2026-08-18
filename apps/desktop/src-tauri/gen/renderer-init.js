@@ -1,62 +1,4 @@
-import type { NanoniRendererInitScriptOptions } from "./types.ts";
-import {
-  NANONI_BRIDGE_CHANNELS,
-  NANONI_PUSH_CHANNELS,
-  NANONI_SSH_PASSWORD_PROMPT_CANCELLED_RESULT,
-} from "./bridge.ts";
-
-const DEFAULT_INVOKE_COMMAND = "host_invoke";
-const DEFAULT_EVENTS_COMMAND = "desktop_events";
-
-const serializeScriptValue = (value: unknown, label: string): string => {
-  let serialized: string | undefined;
-  try {
-    serialized = JSON.stringify(value);
-  } catch (cause) {
-    throw new TypeError(`Unable to serialize ${label} for the Tauri init script.`, { cause });
-  }
-  if (serialized === undefined) {
-    throw new TypeError(`Unable to serialize ${label} for the Tauri init script.`);
-  }
-
-  // Keep the generated source safe when a future caller embeds it in an HTML
-  // document or a script-bearing diagnostic page.  JSON remains unchanged
-  // after evaluation.
-  return serialized
-    .replaceAll("<", "\\u003c")
-    .replaceAll(">", "\\u003e")
-    .replaceAll("&", "\\u0026")
-    .replaceAll("\u2028", "\\u2028")
-    .replaceAll("\u2029", "\\u2029");
-};
-
-/**
- * Build the small init script used by every Phase 0 renderer window.
- *
- * The script deliberately uses Tauri's documented internal bridge rather than
- * importing a module: initialization scripts execute before the web bundle and
- * have no module loader.  The callback/channel shape mirrors
- * `@tauri-apps/api/core` so the Rust command receives a real Channel marker.
- */
-export const createNanoniInitScript = (options: NanoniRendererInitScriptOptions): string => {
-  const boot = serializeScriptValue(options.boot ?? {}, "__NANONI_BOOT__");
-  const sync = serializeScriptValue(options.sync, "renderer sync values");
-  const invokeCommand = serializeScriptValue(
-    options.invokeCommand ?? DEFAULT_INVOKE_COMMAND,
-    "invoke command",
-  );
-  const eventsCommand = serializeScriptValue(
-    options.eventsCommand ?? DEFAULT_EVENTS_COMMAND,
-    "events command",
-  );
-  const bridgeChannels = serializeScriptValue(NANONI_BRIDGE_CHANNELS, "bridge channels");
-  const pushChannels = serializeScriptValue(NANONI_PUSH_CHANNELS, "push channels");
-  const sshPasswordPromptCancelledResult = serializeScriptValue(
-    NANONI_SSH_PASSWORD_PROMPT_CANCELLED_RESULT,
-    "SSH cancellation result type",
-  );
-
-  return `(() => {
+(() => {
   "use strict";
   const root = window;
   const internals = root.__TAURI_INTERNALS__;
@@ -77,9 +19,7 @@ export const createNanoniInitScript = (options: NanoniRendererInitScriptOptions)
   };
 
   const boot = deepFreeze(
-    Object.prototype.hasOwnProperty.call(root, "__NANONI_BOOT__")
-      ? root.__NANONI_BOOT__
-      : ${boot},
+    Object.prototype.hasOwnProperty.call(root, "__NANONI_BOOT__") ? root.__NANONI_BOOT__ : {},
   );
   Object.defineProperty(root, "__NANONI_BOOT__", {
     configurable: false,
@@ -88,7 +28,12 @@ export const createNanoniInitScript = (options: NanoniRendererInitScriptOptions)
     value: boot,
   });
 
-  const sync = deepFreeze(${sync});
+  const sync = deepFreeze({
+    appBranding: null,
+    systemLocale: null,
+    localEnvironmentBootstraps: [],
+    windowFullscreenState: false,
+  });
   const listenersByChannel = new Map();
   const listenersFor = (channel) => {
     let listeners = listenersByChannel.get(channel);
@@ -114,7 +59,10 @@ export const createNanoniInitScript = (options: NanoniRendererInitScriptOptions)
   };
   const dispatchPush = (value) => {
     if (value === null || typeof value !== "object") return;
-    if (typeof value.channel !== "string" || !Object.prototype.hasOwnProperty.call(value, "payload")) {
+    if (
+      typeof value.channel !== "string" ||
+      !Object.prototype.hasOwnProperty.call(value, "payload")
+    ) {
       return;
     }
     const listeners = listenersByChannel.get(value.channel);
@@ -163,7 +111,7 @@ export const createNanoniInitScript = (options: NanoniRendererInitScriptOptions)
       toJSON: channelMarker,
       __TAURI_TO_IPC_KEY__: channelMarker,
     };
-    eventsReady = Promise.resolve(internals.invoke(${eventsCommand}, { channel: eventChannel }))
+    eventsReady = Promise.resolve(internals.invoke("desktop_events", { channel: eventChannel }))
       .then(() => true)
       .catch(() => {
         cleanupCallback();
@@ -175,14 +123,58 @@ export const createNanoniInitScript = (options: NanoniRendererInitScriptOptions)
     if (typeof channel !== "string" || channel.length === 0) {
       return Promise.reject(new TypeError("desktopBridge.invoke requires a non-empty channel."));
     }
-    return Promise.resolve(internals.invoke(${invokeCommand}, { channel, payload })).catch((cause) => {
+    return Promise.resolve(internals.invoke("host_invoke", { channel, payload })).catch((cause) => {
       const message = cause instanceof Error ? cause.message : String(cause);
       throw new Error("Error invoking remote method '" + channel + "': " + message);
     });
   };
 
-  const channels = ${bridgeChannels};
-  const pushChannels = ${pushChannels};
+  const channels = {
+    getLocalEnvironmentBearerToken: "desktop:get-local-environment-bearer-token",
+    getClientSettings: "desktop:get-client-settings",
+    setClientSettings: "desktop:set-client-settings",
+    getConnectionCatalog: "desktop:get-connection-catalog",
+    setConnectionCatalog: "desktop:set-connection-catalog",
+    clearConnectionCatalog: "desktop:clear-connection-catalog",
+    discoverSshHosts: "desktop:discover-ssh-hosts",
+    ensureSshEnvironment: "desktop:ensure-ssh-environment",
+    disconnectSshEnvironment: "desktop:disconnect-ssh-environment",
+    fetchSshEnvironmentDescriptor: "desktop:fetch-ssh-environment-descriptor",
+    bootstrapSshBearerSession: "desktop:bootstrap-ssh-bearer-session",
+    fetchSshSessionState: "desktop:fetch-ssh-session-state",
+    issueSshWebSocketTicket: "desktop:issue-ssh-websocket-token",
+    resolveSshPasswordPrompt: "desktop:resolve-ssh-password-prompt",
+    getServerExposureState: "desktop:get-server-exposure-state",
+    setServerExposureMode: "desktop:set-server-exposure-mode",
+    setTailscaleServeEnabled: "desktop:set-tailscale-serve-enabled",
+    getAdvertisedEndpoints: "desktop:get-advertised-endpoints",
+    getWslState: "desktop:get-wsl-state",
+    setWslBackendEnabled: "desktop:set-wsl-backend-enabled",
+    setWslDistro: "desktop:set-wsl-distro",
+    setWslOnly: "desktop:set-wsl-only",
+    pickFolder: "desktop:pick-folder",
+    pickThemeFiles: "desktop:pick-theme-files",
+    setTheme: "desktop:set-theme",
+    showContextMenu: "desktop:context-menu",
+    openExternal: "desktop:open-external",
+    probeRemoteEditors: "desktop:probe-remote-editors",
+    getUpdateState: "desktop:update-get-state",
+    setUpdateChannel: "desktop:update-set-channel",
+    checkForUpdate: "desktop:update-check",
+    downloadUpdate: "desktop:update-download",
+    installUpdate: "desktop:update-install",
+    getAppBranding: "desktop:get-app-branding",
+    getSystemLocale: "desktop:get-system-locale",
+    getLocalEnvironmentBootstraps: "desktop:get-local-environment-bootstraps",
+    getWindowFullscreenState: "desktop:get-window-fullscreen-state",
+  };
+  const pushChannels = {
+    onSshPasswordPrompt: "desktop:ssh-password-prompt",
+    onMenuAction: "desktop:menu-action",
+    onQuitShortcut: "desktop:quit-shortcut",
+    onWindowFullscreenStateChange: "desktop:window-fullscreen-state",
+    onUpdateState: "desktop:update-state",
+  };
   const call = (method, payload) => invoke(channels[method], payload);
   const onObject = (channel, listener) =>
     onPush(channel, (value) => {
@@ -197,9 +189,10 @@ export const createNanoniInitScript = (options: NanoniRendererInitScriptOptions)
     if (
       result !== null &&
       typeof result === "object" &&
-      result.type === ${sshPasswordPromptCancelledResult}
+      result.type === "ssh-password-prompt-cancelled"
     ) {
-      const message = typeof result.message === "string" ? result.message : "SSH authentication cancelled.";
+      const message =
+        typeof result.message === "string" ? result.message : "SSH authentication cancelled.";
       throw new Error(message);
     }
     return result;
@@ -282,18 +275,4 @@ export const createNanoniInitScript = (options: NanoniRendererInitScriptOptions)
     writable: false,
     value: eventsReady,
   });
-})();`;
-};
-
-/** Frozen bootstrap artifact embedded by the native window builder. */
-export const createDefaultNanoniInitScript = (): string =>
-  createNanoniInitScript({
-    sync: {
-      appBranding: null,
-      systemLocale: null,
-      localEnvironmentBootstraps: [],
-      windowFullscreenState: false,
-    },
-  });
-
-export { DEFAULT_EVENTS_COMMAND, DEFAULT_INVOKE_COMMAND };
+})();

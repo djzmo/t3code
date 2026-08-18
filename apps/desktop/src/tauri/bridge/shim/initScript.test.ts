@@ -1,6 +1,8 @@
 import { assert, describe, it } from "@effect/vitest";
 
-import { createNanoniInitScript } from "./initScript.ts";
+// @ts-expect-error Vite loads the checked-in generated artifact as text.
+import generatedRendererInit from "../../../../src-tauri/gen/renderer-init.js?raw";
+import { createDefaultNanoniInitScript, createNanoniInitScript } from "./initScript.ts";
 import { NANONI_BRIDGE_CHANNELS, NANONI_PUSH_CHANNELS } from "./bridge.ts";
 
 type Callback = (value: unknown) => void;
@@ -82,6 +84,19 @@ describe("Nanoni renderer init script", () => {
         wsBaseUrl: "ws://127.0.0.1:3000",
       },
     ]);
+  });
+
+  it("preserves native boot metadata installed before the shim", () => {
+    const { window } = makeRenderer();
+    window.__NANONI_BOOT__ = { productVersion: "2.0.0-native" };
+    runInitScript(window);
+
+    assert.deepEqual(window.__NANONI_BOOT__, { productVersion: "2.0.0-native" });
+    assert.isTrue(Object.isFrozen(window.__NANONI_BOOT__));
+  });
+
+  it("keeps the Rust-embedded renderer artifact in sync", () => {
+    assert.equal(generatedRendererInit, `${createDefaultNanoniInitScript()}\n`);
   });
 
   it("uses host_invoke and registers one ordered desktop_events channel", async () => {
