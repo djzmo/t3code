@@ -8,11 +8,13 @@
 
 mod broker;
 mod identity;
+pub mod rpc_adapter;
+pub mod sidecar;
 
 pub use broker::{
-    BrokerConfig, BrokerError, BrokerEvent, EventStream, ExitStatusInfo, MAX_OUTPUT_CHUNK_BYTES,
-    OutputStream, ProcessBroker, ProcessKind, RegistrationOutcome, ReleaseOutcome, SpawnRequest,
-    SpawnedProcess, StdinOutcome,
+    AttemptToken, BrokerConfig, BrokerError, BrokerEvent, EventStream, ExitStatusInfo,
+    MAX_OUTPUT_CHUNK_BYTES, OutputStream, ProcessBroker, ProcessKind, RegistrationOutcome,
+    RegistrationToken, ReleaseOutcome, SpawnRequest, SpawnedProcess, StdinOutcome,
 };
 pub use identity::{
     IdentityBackend, IdentityError, IdentityProof, NativeIdentityBackend, ProcessIdentity,

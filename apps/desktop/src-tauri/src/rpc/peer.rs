@@ -561,7 +561,9 @@ impl Peer {
             let frame = encode(&response).map_err(PeerError::Transport)?;
             self.state = PeerState::Ready;
             self.hello_deadline_ms = None;
-            return Ok(vec![PeerEvent::Outgoing(frame), PeerEvent::Ready]);
+            let mut events = vec![PeerEvent::Outgoing(frame), PeerEvent::Ready];
+            events.extend(self.flush_pre_ready(0)?);
+            return Ok(events);
         }
         if self.inbound_ids.contains(&request.id) {
             return self.invalid_request_response(Some(request.id), "duplicate request id");
@@ -764,6 +766,46 @@ mod tests {
             _ => None,
         });
         assert!(decoded.is_some());
+    }
+
+    #[test]
+    fn shell_flushes_renderer_invokes_immediately_after_hello() {
+        let mut host = Peer::host(4242);
+        let mut shell = Peer::shell(hello_result());
+        assert!(
+            shell
+                .queue_renderer_invoke("desktop:test", json!({ "value": 1 }), 90)
+                .expect("renderer invoke queues")
+                .is_none()
+        );
+
+        let hello = wire(host.start(100).expect("host starts").remove(0));
+        let shell_events = shell.receive(&hello, 101).expect("shell receives hello");
+        let outgoing = shell_events
+            .into_iter()
+            .filter_map(|event| match event {
+                PeerEvent::Outgoing(bytes) => Some(bytes),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(outgoing.len(), 2);
+
+        let hello_events = host
+            .receive(&outgoing[0], 102)
+            .expect("host receives hello response");
+        assert!(
+            hello_events
+                .iter()
+                .any(|event| matches!(event, PeerEvent::Ready))
+        );
+        let invoke_events = host
+            .receive(&outgoing[1], 103)
+            .expect("host receives queued invoke");
+        assert!(invoke_events.iter().any(|event| matches!(
+            event,
+            PeerEvent::Incoming(envelope)
+                if matches!(envelope.as_ref(), RpcEnvelope::Request(request) if request.method == RpcMethod::IpcInvoke)
+        )));
     }
 
     #[test]
