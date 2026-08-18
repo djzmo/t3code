@@ -5,6 +5,36 @@ protocol. It is intentionally a skeleton until the owner approves packaged
 artifact execution. No Electron/Tauri process, installer, browser, dev server,
 or benchmark was launched while preparing this document.
 
+## Identity
+
+The owner froze D-ID on 2026-08-18. Agent Nanoni uses namespaces that are
+distinct from T3 Code and does not migrate Electron data:
+
+| Surface                                       | Packaged identity                         |
+| --------------------------------------------- | ----------------------------------------- |
+| Bundle identifier                             | `app.nanoni.agent.desktop`                |
+| Product and display name                      | `Agent Nanoni`                            |
+| Executable, installer directory, and WM class | `AgentNanoni`                             |
+| URL scheme                                    | `agent-nanoni`                            |
+| Node sidecar                                  | `agent-nanoni-node`                       |
+| Data home                                     | the absolute OS-home path `.agent-nanoni` |
+| Linux desktop entry                           | `agent-nanoni.desktop`                    |
+| Windows AppUserModelId                        | `app.nanoni.agent.desktop`                |
+| Safe-storage account                          | `safe-storage-key`                        |
+
+Development identity is isolated per worktree. The development bundle and
+single-instance identifier are
+`app.nanoni.agent.desktop.dev.<worktree-id>`, where `worktree-id` is the short
+hash of the canonical worktree path after resolving symlinks or junctions and
+normalizing Windows drive-letter case. The development data home is the
+worktree-local `.t3/tauri`; the packaged URL scheme is not registered in
+development. Development keychain services use the same worktree-specific
+identifier and the `safe-storage-key` account.
+
+Updater repository/endpoint values, the minisign public-key slot, Apple Team
+ID, and signing credentials remain intentionally unset in Phase 0. They do not
+change the frozen application namespaces above.
+
 ## Baseline (V0)
 
 The V0 baseline compares Electron and the eventual Tauri V4-final artifact
