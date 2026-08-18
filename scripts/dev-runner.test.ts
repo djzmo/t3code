@@ -86,6 +86,18 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
       }),
     );
 
+    it.effect("launches the fork-owned Tauri loop through the desktop workspace", () =>
+      Effect.sync(() => {
+        assert.deepStrictEqual(getDevRunnerModeArgs("dev:tauri"), [
+          "exec",
+          "--filter=@t3tools/desktop",
+          "--",
+          "node",
+          "scripts/tauri/dev.mjs",
+        ]);
+      }),
+    );
+
     it.effect("places Vite+ run flags before the task name", () =>
       Effect.sync(() => {
         assert.deepStrictEqual(getDevRunnerModeArgs("dev"), [
@@ -541,6 +553,35 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
 
         assert.equal(env.VITE_HTTP_URL, "http://127.0.0.1:13773");
         assert.equal(env.VITE_WS_URL, "ws://127.0.0.1:13773");
+      }),
+    );
+
+    it.effect("uses desktop loopback wiring for dev:tauri", () =>
+      Effect.gen(function* () {
+        const env = yield* createDevRunnerEnv({
+          mode: "dev:tauri",
+          baseEnv: {
+            VITE_HTTP_URL: "http://localhost:1",
+            VITE_WS_URL: "ws://localhost:1",
+            HOST: "0.0.0.0",
+          },
+          serverOffset: 4,
+          webOffset: 4,
+          t3Home: "/tmp/nanoni-tauri",
+          browser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: undefined,
+          port: undefined,
+          devUrl: undefined,
+        });
+
+        assert.equal(env.VITE_DEV_SERVER_URL, "http://127.0.0.1:5737");
+        assert.equal(env.VITE_HTTP_URL, undefined);
+        assert.equal(env.VITE_WS_URL, undefined);
+        assert.equal(env.HOST, "127.0.0.1");
+        assert.equal(env.T3CODE_PORT, "13777");
+        assert.equal(env.T3CODE_SINGLE_ORIGIN_DEV, "1");
       }),
     );
   });

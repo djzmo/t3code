@@ -1,0 +1,218 @@
+import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
+
+const scriptDirectory = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
+const desktopDirectory = NodePath.resolve(scriptDirectory, "../..");
+const repositoryRoot = NodePath.resolve(desktopDirectory, "../..");
+const developmentIdentifierPrefix = "app.nanoni.agent.desktop.dev.";
+const clerkConfigurationKeys = [
+  "VITE_CLERK_PUBLISHABLE_KEY",
+  "T3CODE_CLERK_PUBLISHABLE_KEY",
+  "VITE_CLERK_JWT_TEMPLATE",
+  "T3CODE_CLERK_JWT_TEMPLATE",
+  "VITE_CLERK_CLI_OAUTH_CLIENT_ID",
+  "T3CODE_CLERK_CLI_OAUTH_CLIENT_ID",
+];
+
+/**
+ * Resolve a worktree path before deriving any identity material from it.
+ * Windows paths are normalized for drive-letter and case differences so a
+ * junction or a differently-cased checkout cannot create a second identity.
+ */
+export function normalizeWorktreePath(value, { platform = NodeOS.platform() } = {}) {
+  const normalized = NodePath.normalize(value).replaceAll("\\", "/");
+  return platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+export function resolveCanonicalWorktreePath({
+  cwd = process.cwd(),
+  platform = NodeOS.platform(),
+  realpath = (path) => NodeFS.realpathSync.native(path),
+} = {}) {
+  return normalizeWorktreePath(realpath(cwd), { platform });
+}
+
+export function worktreeIdentity(canonicalPath) {
+  const digest = NodeCrypto.createHash("sha256").update(canonicalPath, "utf8").digest("hex");
+  return digest.slice(0, 12);
+}
+
+export function resolveDevelopmentIdentifier(canonicalPath) {
+  return `${developmentIdentifierPrefix}${worktreeIdentity(canonicalPath)}`;
+}
+
+/**
+ * Tauri merges this file over tauri.conf.json. Keep it deliberately narrow:
+ * the base window, capabilities, and packaged URL scheme must remain intact;
+ * only the per-worktree development identifier is changed.
+ */
+export function createDevelopmentOverlay(identifier, devUrl) {
+  const parsed = new URL(devUrl);
+  if (
+    parsed.protocol !== "http:" ||
+    (parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1")
+  ) {
+    throw new Error(`Tauri development URL must be loopback HTTP; received ${devUrl}.`);
+  }
+  return {
+    identifier,
+    build: { devUrl: parsed.href.replace(/\/$/, "") },
+  };
+}
+
+export function findClerkConfiguration(environment) {
+  return clerkConfigurationKeys.filter((key) => {
+    const value = environment[key];
+    return typeof value === "string" && value.trim().length > 0;
+  });
+}
+
+export function assertClerkAbsent(environment) {
+  const configuredKeys = findClerkConfiguration(environment);
+  if (configuredKeys.length > 0) {
+    throw new Error(
+      `Tauri development requires Clerk configuration to be absent until F11; unset ${configuredKeys.join(", ")}.`,
+    );
+  }
+}
+
+export const DEV_WEB_GRAPH_ARGS = [
+  "run",
+  "--filter=@t3tools/contracts",
+  "--filter=@t3tools/web",
+  "--filter=t3",
+  "--parallel",
+  "dev",
+];
+
+function executable(name) {
+  return process.platform === "win32" ? `${name}.cmd` : name;
+}
+
+export function resolveDevelopmentCommands({ overlayPath, extraArgs = [] }) {
+  return {
+    web: {
+      command: executable("vp"),
+      args: [...DEV_WEB_GRAPH_ARGS],
+    },
+    tauri: {
+      command: executable("pnpm"),
+      args: [
+        "--filter",
+        "@t3tools/desktop",
+        "exec",
+        "tauri",
+        "dev",
+        "--config",
+        overlayPath,
+        ...extraArgs,
+      ],
+    },
+  };
+}
+
+function writeOverlay({ directory, identifier, devUrl }) {
+  NodeFS.mkdirSync(directory, { recursive: true });
+  const overlayPath = NodePath.join(directory, "tauri.dev.conf.json");
+  NodeFS.writeFileSync(
+    overlayPath,
+    `${JSON.stringify(createDevelopmentOverlay(identifier, devUrl), null, 2)}\n`,
+    "utf8",
+  );
+  return overlayPath;
+}
+
+function terminateChild(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+
+  if (process.platform === "win32" && child.pid !== undefined) {
+    NodeChildProcess.spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+      stdio: "ignore",
+    });
+    return;
+  }
+
+  child.kill("SIGTERM");
+}
+
+function waitForExit(child) {
+  return new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve(child.exitCode ?? 1);
+      return;
+    }
+
+    child.once("exit", (code) => resolve(code ?? 1));
+    child.once("error", () => resolve(1));
+  });
+}
+
+async function run() {
+  const environment = { ...process.env };
+  assertClerkAbsent(environment);
+
+  const canonicalPath = resolveCanonicalWorktreePath();
+  const identifier = resolveDevelopmentIdentifier(canonicalPath);
+  const devUrl = environment.VITE_DEV_SERVER_URL;
+  if (typeof devUrl !== "string" || devUrl.trim().length === 0) {
+    throw new Error("VITE_DEV_SERVER_URL is required for Tauri development.");
+  }
+  const overlayDirectory = NodeFS.mkdtempSync(
+    NodePath.join(NodeOS.tmpdir(), "agent-nanoni-tauri-dev-"),
+  );
+  const overlayPath = writeOverlay({ directory: overlayDirectory, identifier, devUrl });
+  const commands = resolveDevelopmentCommands({
+    overlayPath,
+    extraArgs: process.argv.slice(2),
+  });
+  const spawnOptions = {
+    cwd: repositoryRoot,
+    env: environment,
+    stdio: "inherit",
+    windowsHide: true,
+  };
+  const web = NodeChildProcess.spawn(commands.web.command, commands.web.args, spawnOptions);
+  const tauri = NodeChildProcess.spawn(commands.tauri.command, commands.tauri.args, {
+    ...spawnOptions,
+    cwd: desktopDirectory,
+  });
+  let stopping = false;
+  const stop = () => {
+    if (stopping) {
+      return;
+    }
+
+    stopping = true;
+    terminateChild(web);
+    terminateChild(tauri);
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+
+  const firstExit = await Promise.race([
+    waitForExit(web).then((code) => ({ child: web, code })),
+    waitForExit(tauri).then((code) => ({ child: tauri, code })),
+  ]);
+  stop();
+  const remainingExit = await Promise.all([waitForExit(web), waitForExit(tauri)]);
+  NodeFS.rmSync(overlayDirectory, { recursive: true, force: true });
+  process.exitCode =
+    firstExit.child === tauri
+      ? firstExit.code
+      : firstExit.code !== 0
+        ? firstExit.code
+        : remainingExit[1];
+}
+
+if (process.argv[1] && import.meta.url === NodeURL.pathToFileURL(process.argv[1]).href) {
+  run().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}
