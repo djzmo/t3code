@@ -7,7 +7,11 @@ import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
 
 import { JsonRpcPeer } from "../rpc/JsonRpcPeer.ts";
-import { makeRpcProcessBroker, type ProcessSpawnParams } from "./RpcProcessBroker.ts";
+import {
+  makeRpcProcessBroker,
+  type ProcessSpawnParams,
+  type RpcProcessPeer,
+} from "./RpcProcessBroker.ts";
 
 const encoder = new TextEncoder();
 
@@ -54,6 +58,10 @@ describe("RpcProcessBroker", () => {
           pid: value.attemptId === "one" ? 801 : 802,
           registrationId: `registration-${value.attemptId}`,
         };
+      });
+      const cancellations: unknown[] = [];
+      shell.onNotification("process.cancel", (value) => {
+        cancellations.push(value);
       });
       const broker = makeRpcProcessBroker(host);
 
@@ -102,6 +110,7 @@ describe("RpcProcessBroker", () => {
           assert.equal(yield* second.handle.exitCode, ChildProcessSpawner.ExitCode(0));
         }),
       );
+      assert.deepEqual(cancellations, []);
     }),
   );
 
@@ -202,6 +211,225 @@ describe("RpcProcessBroker", () => {
         type: "process.exit",
         code: 17,
       });
+      assert.equal(broker.activeProcessCount(), 0);
+    }),
+  );
+
+  it.effect("buffers output and exit notifications that precede the spawn response", () =>
+    Effect.gen(function* () {
+      const { host, shell } = pair();
+      shell.onRequest("process.spawn", async (raw) => {
+        const value = raw as ProcessSpawnParams;
+        const processId = `shell-pre-response-${value.attemptId}`;
+        await shell.notify("process.output", {
+          processId,
+          fd: 1,
+          sequence: 0,
+          bytesBase64: toBase64("pre-response"),
+        });
+        await shell.notify("process.exit", { processId, code: 0 });
+        return { processId, pid: 807, registrationId: "registration-pre-response" };
+      });
+      const broker = makeRpcProcessBroker(host);
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const result = yield* broker.spawn(params("pre-response"));
+          assert.equal(result._tag, "registered");
+          if (result._tag !== "registered") return;
+          const output = yield* Stream.runCollect(result.handle.stdout);
+          assert.equal(collectText(output), "pre-response");
+          assert.equal(yield* result.handle.exitCode, ChildProcessSpawner.ExitCode(0));
+        }),
+      );
+    }),
+  );
+
+  it.effect("completes a fast exit when output and exit precede the spawn response", () =>
+    Effect.gen(function* () {
+      const { host, shell } = pair();
+      shell.onRequest("process.spawn", async () => {
+        await shell.notify("process.output", {
+          processId: "shell-pre-response-fast",
+          fd: 1,
+          sequence: 0,
+          bytesBase64: toBase64("discarded"),
+        });
+        await shell.notify("process.exit", {
+          processId: "shell-pre-response-fast",
+          code: 17,
+        });
+        return {
+          processId: "shell-pre-response-fast",
+          pid: 808,
+          registrationId: null,
+        };
+      });
+      const broker = makeRpcProcessBroker(host);
+
+      const result = yield* broker.spawn(params("pre-response-fast"));
+      assert.equal(result._tag, "fast-exit");
+      if (result._tag !== "fast-exit") return;
+      const output = yield* Stream.runCollect(result.handle.stdout);
+      assert.equal(collectText(output), "discarded");
+      assert.equal(yield* result.handle.exitCode, ChildProcessSpawner.ExitCode(17));
+      assert.deepEqual(yield* result.terminal, {
+        type: "process.exit",
+        code: 17,
+      });
+      assert.equal(broker.activeProcessCount(), 0);
+    }),
+  );
+
+  it.effect("cancels a blocked spawn request when its fiber is interrupted", () =>
+    Effect.gen(function* () {
+      const { host, shell } = pair();
+      let signalRequestStarted!: () => void;
+      const requestStarted = new Promise<void>((resolve) => {
+        signalRequestStarted = resolve;
+      });
+      const cancellations: unknown[] = [];
+      shell.onRequest("process.spawn", () => {
+        signalRequestStarted();
+        return new Promise<never>(() => undefined);
+      });
+      shell.onNotification("process.cancel", (value) => {
+        cancellations.push(value);
+      });
+      const broker = makeRpcProcessBroker(host);
+
+      const spawnFiber = yield* broker.spawn(params("blocked")).pipe(Effect.forkChild);
+      yield* Effect.promise(() => requestStarted);
+      yield* Fiber.interrupt(spawnFiber);
+      const interrupted = yield* Fiber.join(spawnFiber).pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(interrupted));
+      assert.deepEqual(cancellations, [{ attemptId: "blocked" }]);
+      assert.equal(broker.activeProcessCount(), 0);
+    }),
+  );
+
+  it.effect("cancels a malformed spawn result", () =>
+    Effect.gen(function* () {
+      const { host, shell } = pair();
+      const cancellations: unknown[] = [];
+      shell.onRequest("process.spawn", () => ({ malformed: true }));
+      shell.onNotification("process.cancel", (value) => {
+        cancellations.push(value);
+      });
+      const broker = makeRpcProcessBroker(host);
+
+      const result = yield* broker.spawn(params("malformed")).pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(result));
+      assert.deepEqual(cancellations, [{ attemptId: "malformed" }]);
+      assert.equal(broker.activeProcessCount(), 0);
+    }),
+  );
+
+  it.effect("bounds cancelled-process tombstones while discarding recent late events", () =>
+    Effect.gen(function* () {
+      const outputHandlers = new Set<(params: unknown) => void | Promise<void>>();
+      const cancellations: unknown[] = [];
+      const peer: RpcProcessPeer = {
+        request: async (_method, raw) => {
+          const value = raw as ProcessSpawnParams;
+          if (value.attemptId.startsWith("cancel-")) {
+            // Keep the process ID in the malformed response so the broker must
+            // remember it even though registrationId is missing.
+            return {
+              processId: `cancelled-${value.attemptId.slice("cancel-".length)}`,
+              pid: 810,
+            };
+          }
+          if (value.attemptId === "reuse-old") {
+            // The newest tombstone must still discard notifications while this
+            // replacement response is in flight.
+            for (const handler of outputHandlers) {
+              await handler({
+                processId: "cancelled-2",
+                fd: 1,
+                sequence: 0,
+                bytesBase64: toBase64("late-cancelled-output"),
+              });
+            }
+            return {
+              processId: "cancelled-0",
+              pid: 811,
+              registrationId: "registration-reused-old",
+            };
+          }
+          return {
+            processId: "cancelled-2",
+            pid: 812,
+            registrationId: "registration-reused-newest",
+          };
+        },
+        notify: async (method, value) => {
+          if (method === "process.cancel") cancellations.push(value);
+        },
+        onNotification: (method, handler) => {
+          if (method === "process.output") outputHandlers.add(handler);
+          return () => {
+            if (method === "process.output") outputHandlers.delete(handler);
+          };
+        },
+      };
+      const broker = makeRpcProcessBroker(peer, { queueCapacity: 2 });
+
+      for (const attemptId of ["cancel-0", "cancel-1", "cancel-2"]) {
+        const result = yield* broker.spawn(params(attemptId)).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(result));
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          // FIFO eviction makes the oldest tombstone reusable, proving that
+          // repeated cancellations cannot grow this state without bound.
+          const reused = yield* broker.spawn(params("reuse-old"));
+          assert.equal(reused._tag, "registered");
+
+          // The newest tombstone remains active and rejects a late response.
+          const stillCancelled = yield* broker.spawn(params("reuse-newest")).pipe(Effect.exit);
+          assert.isTrue(Exit.isFailure(stillCancelled));
+          assert.equal(broker.activeProcessCount(), 1);
+        }),
+      );
+
+      assert.equal(broker.activeProcessCount(), 0);
+      assert.deepEqual(cancellations, [
+        { attemptId: "cancel-0" },
+        { attemptId: "cancel-1" },
+        { attemptId: "cancel-2" },
+        { attemptId: "reuse-newest" },
+      ]);
+    }),
+  );
+
+  it.effect("fails closed when the pre-registration event buffer overflows", () =>
+    Effect.gen(function* () {
+      const { host, shell } = pair();
+      shell.onRequest("process.spawn", async () => {
+        await shell.notify("process.output", {
+          processId: "shell-pre-response-overflow",
+          fd: 1,
+          sequence: 0,
+          bytesBase64: toBase64("first"),
+        });
+        await shell.notify("process.output", {
+          processId: "shell-pre-response-overflow",
+          fd: 1,
+          sequence: 1,
+          bytesBase64: toBase64("second"),
+        });
+        return {
+          processId: "shell-pre-response-overflow",
+          pid: 809,
+          registrationId: "registration-pre-response-overflow",
+        };
+      });
+      const broker = makeRpcProcessBroker(host, { queueCapacity: 1 });
+
+      const result = yield* broker.spawn(params("pre-response-overflow")).pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(result));
       assert.equal(broker.activeProcessCount(), 0);
     }),
   );

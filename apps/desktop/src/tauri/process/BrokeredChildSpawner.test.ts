@@ -18,10 +18,11 @@ type InputWriter = (
 
 const makeHandle = (
   writeInput: InputWriter = () => Effect.void,
+  exitCode = 0,
 ): ChildProcessSpawner.ChildProcessHandle =>
   ChildProcessSpawner.makeHandle({
     pid: ChildProcessSpawner.ProcessId(42),
-    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(exitCode)),
     isRunning: Effect.succeed(false),
     kill: () => Effect.void,
     stdin: Sink.forEach(() => Effect.void),
@@ -234,6 +235,7 @@ describe("BrokeredChildSpawner", () => {
             pid: ChildProcessSpawner.ProcessId(43),
             registrationId: null,
             terminal: Effect.succeed({ type: "process.exit", code: 7 } as const),
+            handle: makeHandle(() => Effect.void, 7),
           } as const),
         close: () => undefined,
         activeProcessCount: () => 0,
@@ -241,7 +243,14 @@ describe("BrokeredChildSpawner", () => {
       const spawner = makeBrokeredChildSpawner({ broker });
       const handle = yield* Effect.scoped(spawner.spawn(command()));
       assert.equal(yield* handle.exitCode, ChildProcessSpawner.ExitCode(7));
-      assert.equal((yield* Stream.runCollect(handle.stdout)).length, 0);
+      assert.equal(
+        new TextDecoder().decode(
+          Buffer.concat(
+            (yield* Stream.runCollect(handle.stdout)).map((chunk) => Buffer.from(chunk)),
+          ),
+        ),
+        "hello\n",
+      );
       assert.isFalse(yield* handle.isRunning);
     }),
   );

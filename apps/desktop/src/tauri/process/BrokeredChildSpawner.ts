@@ -2,15 +2,10 @@ import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import * as Effect from "effect/Effect";
 import * as PlatformError from "effect/PlatformError";
-import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 
 import { type ManagedChildKind } from "./ManagedChildSpawner.ts";
-import {
-  type ProcessSpawnParams,
-  type RpcFastExitProcess,
-  type RpcProcessBroker,
-} from "./RpcProcessBroker.ts";
+import { type ProcessSpawnParams, type RpcProcessBroker } from "./RpcProcessBroker.ts";
 
 export interface BrokeredChildSpawnerOptions {
   readonly broker: RpcProcessBroker;
@@ -149,36 +144,6 @@ const toSpawnRequest = (
   };
 };
 
-const fastExitHandle = (
-  process: RpcFastExitProcess,
-): Effect.Effect<ChildProcessSpawner.ChildProcessHandle, PlatformError.PlatformError> =>
-  Effect.gen(function* () {
-    const exitCode = process.terminal.pipe(
-      Effect.flatMap((event) =>
-        event.code !== null && Number.isSafeInteger(event.code) && event.code >= 0
-          ? Effect.succeed(ChildProcessSpawner.ExitCode(event.code))
-          : Effect.fail(
-              invalid("exitCode", `process interrupted by signal '${event.signal ?? "unknown"}'`),
-            ),
-      ),
-    );
-    const ignoredInput: Sink.Sink<void, Uint8Array, never, PlatformError.PlatformError> =
-      Sink.forEach(() => Effect.void);
-    return ChildProcessSpawner.makeHandle({
-      pid: process.pid,
-      exitCode,
-      isRunning: process.terminal.pipe(Effect.as(false)),
-      kill: () => Effect.void,
-      stdin: ignoredInput,
-      stdout: Stream.empty,
-      stderr: Stream.empty,
-      all: Stream.empty,
-      getInputFd: () => ignoredInput,
-      getOutputFd: () => Stream.empty,
-      unref: Effect.succeed(Effect.void),
-    });
-  });
-
 export const makeBrokeredChildSpawner = (
   options: BrokeredChildSpawnerOptions,
 ): ChildProcessSpawner.ChildProcessSpawner["Service"] => {
@@ -203,7 +168,7 @@ export const makeBrokeredChildSpawner = (
             error instanceof PlatformError.PlatformError ? error : invalid("spawn", error.message),
           ),
         );
-      if (result._tag === "fast-exit") return yield* fastExitHandle(result);
+      if (result._tag === "fast-exit") return result.handle;
 
       // Match the native Effect spawner: input streams are started only after
       // the child handle exists, and each pump is tied to the caller's scope.

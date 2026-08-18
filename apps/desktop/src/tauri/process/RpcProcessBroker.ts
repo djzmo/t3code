@@ -50,6 +50,7 @@ export interface RpcFastExitProcess {
   readonly processId: string;
   readonly pid: ChildProcessSpawner.ProcessId;
   readonly registrationId: null;
+  readonly handle: ChildProcessSpawner.ChildProcessHandle;
   /** The native terminal event, including a nullable exit code and signal. */
   readonly terminal: Effect.Effect<ProcessExitEvent, PlatformError.PlatformError>;
 }
@@ -74,7 +75,7 @@ export interface RpcProcessBrokerOptions {
 export interface RpcProcessPeer {
   readonly request: (method: "process.spawn", params: unknown) => Promise<unknown>;
   readonly notify: (
-    method: "process.input" | "process.kill" | "process.release",
+    method: "process.cancel" | "process.input" | "process.kill" | "process.release",
     params: unknown,
   ) => Promise<void>;
   readonly onNotification: (
@@ -108,6 +109,7 @@ interface ProcessPortState {
   readonly queue: Queue.Queue<BrokeredChildProcessEvent, PlatformError.PlatformError>;
   readonly terminal: Deferred.Deferred<ProcessExitEvent, PlatformError.PlatformError>;
   readonly retainOutput: boolean;
+  readonly removeOnTerminal: boolean;
   closed: boolean;
 }
 
@@ -136,6 +138,12 @@ const decodeBase64 = (value: string, operation: string): Uint8Array => {
 };
 
 const processIdFrom = (value: string): string => value;
+
+const processIdFromUnknown = (value: unknown): string | undefined => {
+  if (typeof value !== "object" || value === null) return undefined;
+  const candidate = (value as { readonly processId?: unknown }).processId;
+  return typeof candidate === "string" ? candidate : undefined;
+};
 
 const asProcessId = (value: number): ChildProcessSpawner.ProcessId =>
   ChildProcessSpawner.ProcessId(value);
@@ -172,13 +180,34 @@ export const makeRpcProcessBroker = (
   options: RpcProcessBrokerOptions = {},
 ): RpcProcessBroker => {
   const ports = new Map<string, ProcessPortState>();
+  const cancelledProcessIds = new Set<string>();
+  // Native process notifications can race the JSON-RPC spawn response. Keep a
+  // small, process-id keyed buffer until the response installs its port. The
+  // bound is shared across process IDs so an unknown sender cannot grow this
+  // adapter's memory without limit.
+  const preRegistrationEvents = new Map<string, Array<BrokeredChildProcessEvent>>();
   const queueCapacity =
     Number.isSafeInteger(options.queueCapacity) && options.queueCapacity !== undefined
       ? Math.max(1, options.queueCapacity)
       : 128;
+  let preRegistrationEventCount = 0;
+  let pendingSpawnCount = 0;
   let closedCause: unknown;
   let disposeOutput = (): void => undefined;
   let disposeExit = (): void => undefined;
+
+  // A cancelled spawn can still produce a late native notification after its
+  // response has been interrupted or rejected. Retain only the most recent
+  // process IDs, using the existing queue bound so this defensive state stays
+  // proportional to the broker's other bounded buffers.
+  const rememberCancelledProcessId = (processId: string): void => {
+    if (closedCause !== undefined || cancelledProcessIds.has(processId)) return;
+    if (cancelledProcessIds.size >= queueCapacity) {
+      const oldest = cancelledProcessIds.values().next().value;
+      if (oldest !== undefined) cancelledProcessIds.delete(oldest);
+    }
+    cancelledProcessIds.add(processId);
+  };
 
   const runSync = <A>(effect: Effect.Effect<A, never>): void => {
     try {
@@ -201,6 +230,46 @@ export const makeRpcProcessBroker = (
     state.closed = true;
   };
 
+  const discardPort = (state: ProcessPortState, cause: PlatformError.PlatformError): void => {
+    rememberCancelledProcessId(state.processId);
+    failPort(state, cause);
+    removePort(state);
+    const buffered = preRegistrationEvents.get(state.processId);
+    if (buffered !== undefined) {
+      preRegistrationEvents.delete(state.processId);
+      preRegistrationEventCount -= buffered.length;
+    }
+  };
+
+  const clearPreRegistrationEvents = (): void => {
+    preRegistrationEvents.clear();
+    preRegistrationEventCount = 0;
+  };
+
+  const finishSpawn = (): void => {
+    if (pendingSpawnCount > 0) pendingSpawnCount -= 1;
+    if (pendingSpawnCount === 0) clearPreRegistrationEvents();
+  };
+
+  const bufferPreRegistrationEvent = (
+    processId: string,
+    event: BrokeredChildProcessEvent,
+  ): void => {
+    if (pendingSpawnCount === 0) return;
+    if (cancelledProcessIds.has(processId)) return;
+    if (preRegistrationEventCount >= queueCapacity) {
+      close(platformError("events", "bounded pre-registration event buffer is full", "Busy"));
+      return;
+    }
+    const events = preRegistrationEvents.get(processId);
+    if (events === undefined) {
+      preRegistrationEvents.set(processId, [event]);
+    } else {
+      events.push(event);
+    }
+    preRegistrationEventCount += 1;
+  };
+
   const offer = (state: ProcessPortState, event: BrokeredChildProcessEvent): void => {
     if (state.closed) return;
     if (event.type === "process.output" && !state.retainOutput) return;
@@ -211,15 +280,29 @@ export const makeRpcProcessBroker = (
     }
     if (event.type === "process.exit") {
       runSync(Deferred.succeed(state.terminal, event));
+      if (state.removeOnTerminal) removePort(state);
     }
+  };
+
+  const installPort = (state: ProcessPortState): void => {
+    ports.set(state.processId, state);
+    const events = preRegistrationEvents.get(state.processId);
+    if (events === undefined) return;
+    preRegistrationEvents.delete(state.processId);
+    preRegistrationEventCount -= events.length;
+    for (const event of events) offer(state, event);
   };
 
   const onOutput = (raw: unknown): void => {
     try {
       const params = decodeOutputParams(raw);
       const state = ports.get(processIdFrom(params.processId));
-      if (state === undefined) return;
-      offer(state, outputEvent(params));
+      const event = outputEvent(params);
+      if (state === undefined) {
+        bufferPreRegistrationEvent(processIdFrom(params.processId), event);
+      } else {
+        offer(state, event);
+      }
     } catch (cause) {
       close(cause);
     }
@@ -229,8 +312,12 @@ export const makeRpcProcessBroker = (
     try {
       const params = decodeExitParams(raw);
       const state = ports.get(processIdFrom(params.processId));
-      if (state === undefined) return;
-      offer(state, processExitEvent(params));
+      const event = processExitEvent(params);
+      if (state === undefined) {
+        bufferPreRegistrationEvent(processIdFrom(params.processId), event);
+      } else {
+        offer(state, event);
+      }
     } catch (cause) {
       close(cause);
     }
@@ -248,6 +335,8 @@ export const makeRpcProcessBroker = (
     );
     for (const state of ports.values()) failPort(state, error);
     ports.clear();
+    cancelledProcessIds.clear();
+    clearPreRegistrationEvents();
   };
 
   disposeOutput = peer.onNotification("process.output", onOutput);
@@ -262,12 +351,24 @@ export const makeRpcProcessBroker = (
       catch: (cause) => spawnFailure(method, cause),
     });
 
-  const makePort = (state: ProcessPortState, registrationId: string): BrokeredChildProcessPort => ({
+  const makePort = (
+    state: ProcessPortState,
+    registrationId: string | null,
+  ): BrokeredChildProcessPort => ({
     events: Stream.fromQueue(state.queue),
     request: (message: BrokeredChildProcessRequest) => {
       if (closedCause !== undefined || state.closed) {
         return Effect.fail(
           platformError("request", "process broker peer is closed", "UnexpectedEof"),
+        );
+      }
+      if (registrationId === null) {
+        return Effect.fail(
+          platformError(
+            "request",
+            "process operation is unavailable without a registration",
+            "NotFound",
+          ),
         );
       }
       const send = (() => {
@@ -312,81 +413,149 @@ export const makeRpcProcessBroker = (
     RpcProcessBrokerError | PlatformError.PlatformError,
     import("effect/Scope").Scope
   > =>
-    Effect.gen(function* () {
-      if (closedCause !== undefined) {
-        return yield* Effect.fail(
-          platformError("spawn", "process broker peer is closed", "UnexpectedEof"),
-        );
-      }
-      let params: ProcessSpawnParams;
-      try {
-        params = decodeSpawnParams(rawParams);
-      } catch (cause) {
-        return yield* Effect.fail(spawnFailure("process.spawn.params", cause));
-      }
-      let decoded: ProcessSpawnResult;
-      try {
-        decoded = yield* request<ProcessSpawnResult>("process.spawn", params);
-        decoded = decodeSpawnResult(decoded);
-      } catch (cause) {
-        return yield* Effect.fail(
-          cause instanceof RpcProcessBrokerError
-            ? cause
-            : spawnFailure("process.spawn.result", cause),
-        );
-      }
-      const processId = processIdFrom(decoded.processId);
-      if (ports.has(processId)) {
-        return yield* Effect.fail(
-          spawnFailure("process.spawn.result", `duplicate shell processId '${processId}'`),
-        );
-      }
-      const queue = yield* Queue.dropping<BrokeredChildProcessEvent, PlatformError.PlatformError>(
-        queueCapacity,
+    Effect.suspend(() => {
+      pendingSpawnCount += 1;
+      let requestSubmitted = false;
+      let committed = false;
+      let cancelSent = false;
+      let attemptId: string | undefined;
+      let processId: string | undefined;
+      let installedState: ProcessPortState | undefined;
+
+      const rollback = Effect.uninterruptible(
+        Effect.gen(function* () {
+          if (!requestSubmitted || committed || cancelSent || attemptId === undefined) return;
+          cancelSent = true;
+          const cause = platformError(
+            "spawn",
+            `process spawn '${attemptId}' was cancelled before handle installation`,
+            "Unknown",
+          );
+          if (installedState !== undefined) {
+            discardPort(installedState, cause);
+          } else if (processId !== undefined) {
+            rememberCancelledProcessId(processId);
+            const buffered = preRegistrationEvents.get(processId);
+            if (buffered !== undefined) {
+              preRegistrationEvents.delete(processId);
+              preRegistrationEventCount -= buffered.length;
+            }
+          }
+          yield* Effect.tryPromise({
+            try: async () => {
+              await peer.notify("process.cancel", { attemptId });
+            },
+            catch: () => undefined,
+          }).pipe(Effect.ignore);
+        }),
       );
-      const terminal = yield* Deferred.make<ProcessExitEvent, PlatformError.PlatformError>();
-      const state: ProcessPortState = {
-        processId,
-        queue,
-        terminal,
-        retainOutput: decoded.registrationId !== null,
-        closed: false,
-      };
-      ports.set(processId, state);
-      if (decoded.registrationId === null) {
+
+      return Effect.gen(function* () {
+        if (closedCause !== undefined) {
+          return yield* Effect.fail(
+            platformError("spawn", "process broker peer is closed", "UnexpectedEof"),
+          );
+        }
+        let params: ProcessSpawnParams;
+        try {
+          params = decodeSpawnParams(rawParams);
+        } catch (cause) {
+          return yield* Effect.fail(spawnFailure("process.spawn.params", cause));
+        }
+        attemptId = params.attemptId;
+        let decoded: ProcessSpawnResult;
+        try {
+          yield* Effect.sync(() => {
+            requestSubmitted = true;
+          });
+          const rawResult = yield* request<unknown>("process.spawn", params);
+          processId = processIdFromUnknown(rawResult);
+          decoded = decodeSpawnResult(rawResult);
+        } catch (cause) {
+          return yield* Effect.fail(
+            cause instanceof RpcProcessBrokerError
+              ? cause
+              : spawnFailure("process.spawn.result", cause),
+          );
+        }
+        if (closedCause !== undefined) {
+          return yield* Effect.fail(
+            platformError("spawn", "process broker peer is closed", "UnexpectedEof"),
+          );
+        }
+        processId = processIdFrom(decoded.processId);
+        if (cancelledProcessIds.has(processId)) {
+          return yield* Effect.fail(
+            spawnFailure("process.spawn.result", `shell processId '${processId}' was cancelled`),
+          );
+        }
+        if (ports.has(processId)) {
+          return yield* Effect.fail(
+            spawnFailure("process.spawn.result", `duplicate shell processId '${processId}'`),
+          );
+        }
+        const queue = yield* Queue.dropping<BrokeredChildProcessEvent, PlatformError.PlatformError>(
+          queueCapacity,
+        );
+        const terminal = yield* Deferred.make<ProcessExitEvent, PlatformError.PlatformError>();
+        const state: ProcessPortState = {
+          processId,
+          queue,
+          terminal,
+          retainOutput: true,
+          removeOnTerminal: decoded.registrationId === null,
+          closed: false,
+        };
+        installedState = state;
+        installPort(state);
+        const outputFds = params.additionalFds
+          .filter((fd) => fd.direction === "output")
+          .map((fd) => fd.fd);
+        const inputFds = params.additionalFds
+          .filter((fd) => fd.direction === "input")
+          .map((fd) => fd.fd);
+        const handle = yield* makeBrokeredChildProcessHandle({
+          pid: asProcessId(decoded.pid),
+          processId,
+          registrationId: decoded.registrationId,
+          port: makePort(state, decoded.registrationId),
+          outputFds,
+          inputFds,
+          queueCapacity,
+        });
         const terminalEffect = Deferred.await(terminal).pipe(
           Effect.ensuring(Effect.sync(() => removePort(state))),
         );
+        if (decoded.registrationId === null) {
+          yield* terminalEffect.pipe(Effect.forkScoped);
+          committed = true;
+          return {
+            _tag: "fast-exit",
+            processId,
+            pid: asProcessId(decoded.pid),
+            registrationId: null,
+            handle,
+            terminal: terminalEffect,
+          } satisfies RpcFastExitProcess;
+        }
+        committed = true;
         return {
-          _tag: "fast-exit",
+          _tag: "registered",
           processId,
           pid: asProcessId(decoded.pid),
-          registrationId: null,
-          terminal: terminalEffect,
-        } satisfies RpcFastExitProcess;
-      }
-      const outputFds = params.additionalFds
-        .filter((fd) => fd.direction === "output")
-        .map((fd) => fd.fd);
-      const inputFds = params.additionalFds
-        .filter((fd) => fd.direction === "input")
-        .map((fd) => fd.fd);
-      const handle = yield* makeBrokeredChildProcessHandle({
-        pid: asProcessId(decoded.pid),
-        processId,
-        registrationId: decoded.registrationId,
-        port: makePort(state, decoded.registrationId),
-        outputFds,
-        inputFds,
-        queueCapacity,
-      });
-      return {
-        _tag: "registered",
-        processId,
-        pid: asProcessId(decoded.pid),
-        registrationId: decoded.registrationId,
-        handle,
-      } satisfies RpcRegisteredProcess;
+          registrationId: decoded.registrationId,
+          handle,
+        } satisfies RpcRegisteredProcess;
+      }).pipe(
+        Effect.ensuring(
+          Effect.uninterruptible(
+            Effect.gen(function* () {
+              yield* rollback;
+              finishSpawn();
+            }),
+          ),
+        ),
+      );
     });
 
   return {

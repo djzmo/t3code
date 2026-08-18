@@ -189,6 +189,57 @@ describe("BrokeredChildProcess", () => {
     }),
   );
 
+  it.effect("keeps fast-exit output read-only without broker requests", () =>
+    Effect.gen(function* () {
+      const requests: BrokeredChildProcessRequest[] = [];
+      const { events, port } = yield* makePort(requests);
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const handle = yield* makeBrokeredChildProcessHandle({
+            pid: 707,
+            processId: "process-707",
+            registrationId: null,
+            port,
+            outputFds: [3],
+            inputFds: [4],
+          });
+          const stdout = yield* Stream.runCollect(handle.stdout).pipe(Effect.forkChild);
+          const stderr = yield* Stream.runCollect(handle.stderr).pipe(Effect.forkChild);
+          const all = yield* Stream.runCollect(handle.all).pipe(Effect.forkChild);
+          const fd3 = yield* Stream.runCollect(handle.getOutputFd(3)).pipe(Effect.forkChild);
+          yield* Effect.yieldNow;
+
+          const stdinExit = yield* Stream.run(Stream.make(bytes("input")), handle.stdin).pipe(
+            Effect.exit,
+          );
+          const fdInputExit = yield* Stream.run(
+            Stream.make(bytes("fd-input")),
+            handle.getInputFd(4),
+          ).pipe(Effect.exit);
+          const killExit = yield* handle.kill().pipe(Effect.exit);
+          assert.isTrue(Exit.isFailure(stdinExit));
+          assert.isTrue(Exit.isFailure(fdInputExit));
+          assert.isTrue(Exit.isFailure(killExit));
+          assert.deepEqual(requests, []);
+
+          yield* Queue.offer(events, output("stdout", 0, "out"));
+          yield* Queue.offer(events, output("stderr", 1, "err"));
+          yield* Queue.offer(events, output("fd3", 2, "fd"));
+          yield* Queue.offer(events, { type: "process.exit", code: 0 });
+
+          assert.equal(collect(yield* Fiber.join(stdout)), "out");
+          assert.equal(collect(yield* Fiber.join(stderr)), "err");
+          assert.equal(collect(yield* Fiber.join(all)), "outerr");
+          assert.equal(collect(yield* Fiber.join(fd3)), "fd");
+          assert.equal(yield* handle.exitCode, ChildProcessSpawner.ExitCode(0));
+        }),
+      );
+
+      assert.deepEqual(requests, []);
+    }),
+  );
+
   it.effect("rejects out-of-order output and bounded queue overflow", () =>
     Effect.gen(function* () {
       const requests: BrokeredChildProcessRequest[] = [];

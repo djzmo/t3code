@@ -83,7 +83,8 @@ export interface BrokeredChildProcessPort {
 export interface BrokeredChildProcessHandleOptions {
   readonly pid: ChildProcessSpawner.ProcessId | number;
   readonly processId: string;
-  readonly registrationId: string;
+  /** Null for a read-only handle returned after a process exits during spawn. */
+  readonly registrationId: string | null;
   readonly port: BrokeredChildProcessPort;
   /** Output descriptors declared by the native spawn request. */
   readonly outputFds?: ReadonlyArray<number>;
@@ -139,6 +140,7 @@ export const makeBrokeredChildProcessHandle = (
 > =>
   Effect.gen(function* () {
     const pid = processId(options.pid);
+    const registrationId = options.registrationId;
     const capacity = normaliseCapacity(options.queueCapacity);
     const stdoutQueue = yield* Queue.dropping<Uint8Array, QueueError>(capacity);
     const stderrQueue = yield* Queue.dropping<Uint8Array, QueueError>(capacity);
@@ -293,6 +295,15 @@ export const makeBrokeredChildProcessHandle = (
       message: BrokeredChildProcessRequest,
     ): Effect.Effect<void, PlatformError.PlatformError> =>
       Effect.suspend(() => {
+        if (registrationId === null) {
+          return Effect.fail(
+            processError(
+              message.type === "process.kill" ? "kill" : "input",
+              "process operation is unavailable without a registration",
+              "NotFound",
+            ),
+          );
+        }
         if (terminal.settled && message.type !== "process.release") {
           return Effect.fail(
             processError("request", "process is no longer available", "UnexpectedEof"),
@@ -301,20 +312,28 @@ export const makeBrokeredChildProcessHandle = (
         return options.port.request(message);
       });
 
-    const stdin: Sink.Sink<void, Uint8Array, never, PlatformError.PlatformError> = Sink.forEach(
-      (bytes: Uint8Array) =>
-        request({
-          type: "process.input",
-          processId: options.processId,
-          registrationId: options.registrationId,
-          fd: 0,
-          bytes,
-        }),
-    );
+    const unavailableInput = (): Effect.Effect<never, PlatformError.PlatformError> =>
+      Effect.fail(
+        processError("input", "process input is unavailable without a registration", "NotFound"),
+      );
+
+    const stdin: Sink.Sink<void, Uint8Array, never, PlatformError.PlatformError> =
+      registrationId === null
+        ? Sink.forEach(() => unavailableInput())
+        : Sink.forEach((bytes: Uint8Array) =>
+            request({
+              type: "process.input",
+              processId: options.processId,
+              registrationId,
+              fd: 0,
+              bytes,
+            }),
+          );
 
     const getInputFd = (
       fd: number,
     ): Sink.Sink<void, Uint8Array, never, PlatformError.PlatformError> => {
+      if (registrationId === null) return Sink.forEach(() => unavailableInput());
       if (!Number.isSafeInteger(fd) || fd < 3 || !options.inputFds?.includes(fd)) {
         return Sink.forEach(
           (_: Uint8Array): Effect.Effect<void, PlatformError.PlatformError> => Effect.void,
@@ -324,7 +343,7 @@ export const makeBrokeredChildProcessHandle = (
         request({
           type: "process.input",
           processId: options.processId,
-          registrationId: options.registrationId,
+          registrationId,
           fd,
           bytes,
         }),
@@ -340,20 +359,24 @@ export const makeBrokeredChildProcessHandle = (
     const kill = (
       killOptions?: ChildProcess.KillOptions,
     ): Effect.Effect<void, PlatformError.PlatformError> =>
-      Effect.gen(function* () {
-        const signal = killOptions?.killSignal ?? "SIGTERM";
-        yield* request({
-          type: "process.kill",
-          processId: options.processId,
-          registrationId: options.registrationId,
-          signal,
-          forceKillAfterMs:
-            killOptions?.forceKillAfter === undefined
-              ? 0
-              : Math.max(0, Math.trunc(Duration.toMillis(killOptions.forceKillAfter))),
-        });
-        yield* Deferred.await(exit).pipe(Effect.asVoid);
-      });
+      registrationId === null
+        ? Effect.fail(
+            processError("kill", "process kill is unavailable without a registration", "NotFound"),
+          )
+        : Effect.gen(function* () {
+            const signal = killOptions?.killSignal ?? "SIGTERM";
+            yield* request({
+              type: "process.kill",
+              processId: options.processId,
+              registrationId,
+              signal,
+              forceKillAfterMs:
+                killOptions?.forceKillAfter === undefined
+                  ? 0
+                  : Math.max(0, Math.trunc(Duration.toMillis(killOptions.forceKillAfter))),
+            });
+            yield* Deferred.await(exit).pipe(Effect.asVoid);
+          });
 
     const handle = ChildProcessSpawner.makeHandle({
       pid,
@@ -374,13 +397,13 @@ export const makeBrokeredChildProcessHandle = (
     yield* Effect.addFinalizer(() =>
       Effect.uninterruptible(
         Effect.gen(function* () {
-          if (!terminal.released) {
+          if (registrationId !== null && !terminal.released) {
             terminal.released = true;
             yield* options.port
               .request({
                 type: "process.release",
                 processId: options.processId,
-                registrationId: options.registrationId,
+                registrationId,
               })
               .pipe(Effect.ignore);
           }
