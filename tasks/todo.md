@@ -16,7 +16,7 @@
 - [x] V1.0c: Rust crate and matching serde protocol model.
 - [x] V1.0d: bidirectional fixture drift/round-trip tests.
 - [x] V1.0e: release-workflow guard and guard test.
-- [ ] V1.0f: toolchain pin and alignment test.
+- [x] V1.0f: toolchain pin and alignment test.
 - [x] V1.0g: minimal three-OS Tauri CI.
 
 ## Wave 2
@@ -26,10 +26,10 @@
 - [x] V1.1c: IPC and bounded service stubs.
 - [x] V1.1d: window facade, FakeShell, and host integration test.
 - [x] V1.1e: managed child-spawner decorator and spawn-boundary audits.
-- [ ] V1.2a: Tauri application/capability scaffold.
-- [ ] V1.2b: framed RPC transport and peer supervision.
-- [ ] V1.2c: official Node sidecar acquisition.
-- [ ] V1.2d: lifecycle state machine L and exhaustive tests.
+- [x] V1.2a: Tauri application/capability scaffold.
+- [x] V1.2b: framed RPC transport and peer supervision.
+- [x] V1.2c: official Node sidecar acquisition.
+- [x] V1.2d: lifecycle state machine L and exhaustive tests.
 - [ ] V1.2e: smallest containment mechanism satisfying C1-C7 and its race tests.
 
 ## Wave 3
@@ -40,7 +40,7 @@
 
 ## Wave 4
 
-- [ ] V3a: remote CLI provenance pin and product version resolver.
+- [x] V3a: remote CLI provenance pin and product version resolver.
 - [ ] V3b: renderer product/compat/upstream version metadata.
 - [ ] V1.5: resource staging, debug package, and smoke tests.
 

@@ -188,6 +188,18 @@ describe("Tauri shell/host RPC contract", () => {
     assert.isUndefined(splitCodePoint.bytesBase64);
   });
 
+  it("keeps accepted frame lengths equal to their UTF-8 payload bytes", () => {
+    const encoder = new TextEncoder();
+    for (const fixture of document.frames) {
+      if (fixture.expect !== "accept" || fixture.frame === undefined) continue;
+      const match = /^\x1e(\d+):([\s\S]*)\n$/.exec(fixture.frame);
+      if (match === null || match[1] === undefined || match[2] === undefined) {
+        assert.fail(`${fixture.name} is not a complete frame`);
+      }
+      assert.equal(Number(match[1]), encoder.encode(match[2]).byteLength, fixture.name);
+    }
+  });
+
   it("rejects unknown method names and malformed envelopes", () => {
     assert.throws(() => Schema.decodeUnknownSync(RpcMethodName)("unknown.method"));
     assert.throws(() =>

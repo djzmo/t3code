@@ -21,6 +21,7 @@
     "@t3tools/shared": "workspace:*",
     "@t3tools/ssh": "workspace:*",
     "@t3tools/tailscale": "workspace:*",
+    "@tauri-apps/api": "2.11.1",
     "effect": "catalog:",
     "electron": "41.5.0",
     "electron-store": "^8.2.0",
@@ -30,6 +31,7 @@
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",
+    "@tauri-apps/cli": "2.11.4",
     "@types/node": "catalog:",
     "cross-env": "^10.1.0",
     "electron-builder": "26.15.6",

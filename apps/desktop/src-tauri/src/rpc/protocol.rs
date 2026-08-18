@@ -1621,6 +1621,41 @@ fn validate_frame_fixtures(fixtures: &[FrameFixture]) -> Result<(), ProtocolErro
             return Err(invalid_fixture(name, "expected exactly one frame fixture"));
         }
     }
+    for fixture in fixtures
+        .iter()
+        .filter(|fixture| fixture.expect == FrameExpectation::Accept)
+    {
+        let Some(frame) = fixture.frame.as_deref() else {
+            continue;
+        };
+        let Some(without_separator) = frame.strip_prefix('\u{001e}') else {
+            return Err(invalid_fixture(
+                &fixture.name,
+                "accepted frame has no record separator",
+            ));
+        };
+        let Some((length, payload_with_newline)) = without_separator.split_once(':') else {
+            return Err(invalid_fixture(
+                &fixture.name,
+                "accepted frame has no length separator",
+            ));
+        };
+        let Some(payload) = payload_with_newline.strip_suffix('\n') else {
+            return Err(invalid_fixture(
+                &fixture.name,
+                "accepted frame has no terminator",
+            ));
+        };
+        let declared = length
+            .parse::<usize>()
+            .map_err(|_| invalid_fixture(&fixture.name, "accepted frame length is not decimal"))?;
+        if declared != payload.len() {
+            return Err(invalid_fixture(
+                &fixture.name,
+                "accepted frame length does not equal its UTF-8 payload length",
+            ));
+        }
+    }
     let invalid_utf8 = fixtures
         .iter()
         .find(|fixture| fixture.name == "invalid-utf8")

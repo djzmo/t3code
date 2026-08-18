@@ -29,7 +29,21 @@ jobs:
           run-install: true
 
       - name: Run protocol fixture round-trip tests
-        run: vp test run apps/desktop/src/tauri/rpc/protocol.test.ts
+        run: >-
+          vp test run
+          apps/desktop/src/tauri/rpc/protocol.test.ts
+          scripts/fetch-node-sidecar.test.ts
+          scripts/tauri/check-remote-cli-pin.test.ts
+          scripts/tauri/check-toolchain-alignment.test.ts
+          scripts/tauri/version-grammar.test.ts
+
+      - name: Verify immutable remote CLI pin
+        env:
+          INTEGRITY_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          npm --version | grep -E '^11\.'
+          git remote add upstream https://github.com/pingdotgg/t3code.git
+          node scripts/tauri/check-remote-cli-pin.ts --integrity-base-ref "$INTEGRITY_BASE_REF"
 
   protocol-rust:
     name: Tauri protocol (Rust, ${{ matrix.os }})
@@ -47,6 +61,12 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Install Tauri system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable

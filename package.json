@@ -51,6 +51,7 @@
     "@oxlint/plugins": "^1.63.0",
     "@types/node": "catalog:",
     "@typescript/native-preview": "catalog:",
+    "sigstore": "4.1.1",
     "vite-plus": "catalog:"
   },
   "engines": {

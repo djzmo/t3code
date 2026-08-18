@@ -1,6 +1,8 @@
 //! JSON-RPC contracts shared by the Tauri shell and Node host.
 
+pub mod peer;
 pub mod protocol;
+pub mod transport;
 
 pub use protocol::{
     ProtocolError, ProtocolFixtureDocument, RpcEnvelope, RpcMethod, RpcRequest, RpcResponse,

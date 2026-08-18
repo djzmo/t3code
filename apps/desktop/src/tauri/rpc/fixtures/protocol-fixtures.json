@@ -1086,26 +1086,26 @@
     {
       "name": "ascii-frame",
       "description": "A complete ASCII JSON frame.",
-      "frame": "\u001e16:{\"jsonrpc\":\"2.0\"}\n",
+      "frame": "\u001e17:{\"jsonrpc\":\"2.0\"}\n",
       "expect": "accept"
     },
     {
       "name": "emoji-byte-length",
       "description": "The length prefix counts UTF-8 bytes rather than UTF-16 code units.",
-      "frame": "\u001e40:{\"jsonrpc\":\"2.0\",\"method\":\"💡\"}\n",
+      "frame": "\u001e33:{\"jsonrpc\":\"2.0\",\"method\":\"💡\"}\n",
       "expect": "accept"
     },
     {
       "name": "cjk-byte-length",
       "description": "CJK characters use three UTF-8 bytes each.",
-      "frame": "\u001e45:{\"jsonrpc\":\"2.0\",\"method\":\"界\"}\n",
+      "frame": "\u001e32:{\"jsonrpc\":\"2.0\",\"method\":\"界\"}\n",
       "expect": "accept"
     },
     {
       "name": "split-utf8-codepoint",
       "description": "Input chunks may split inside a UTF-8 sequence and are reassembled.",
       "bytes": [
-        30, 49, 54, 58, 123, 34, 106, 115, 111, 110, 114, 112, 99, 34, 58, 34, 50, 46, 48, 34, 125,
+        30, 49, 55, 58, 123, 34, 106, 115, 111, 110, 114, 112, 99, 34, 58, 34, 50, 46, 48, 34, 125,
         10
       ],
       "expect": "accept"
@@ -1119,14 +1119,14 @@
     {
       "name": "partial-frame",
       "description": "A partial frame waits for more bytes.",
-      "bytes": [30, 49, 54, 58, 123, 34, 106, 115, 111, 110],
+      "bytes": [30, 49, 55, 58, 123, 34, 106, 115, 111, 110],
       "expect": "resync"
     },
     {
       "name": "unframed-bytes",
       "description": "Unframed bytes are skipped until the next record separator.",
       "bytes": [
-        65, 66, 67, 30, 49, 54, 58, 123, 34, 106, 115, 111, 110, 114, 112, 99, 34, 58, 34, 50, 46,
+        65, 66, 67, 30, 49, 55, 58, 123, 34, 106, 115, 111, 110, 114, 112, 99, 34, 58, 34, 50, 46,
         48, 34, 125, 10
       ],
       "expect": "resync"
