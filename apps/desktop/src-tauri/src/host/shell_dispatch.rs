@@ -5,8 +5,9 @@
 //! by the host protocol.
 
 use super::rpc_adapter::{RpcAdapterError, RpcBrokerEventReceiver, RpcProcessBroker};
-use crate::app_events::{
-    self, AppEvent, AppEventAdapter, AppTransition, Effect as AppEventEffect, Platform,
+use crate::app_events::{self, AppEvent, AppTransition, Effect as AppEventEffect, Platform};
+use crate::host::lifecycle_gate::{
+    LifecycleGate, LifecycleGateError, NativeQuitPlan, SharedLifecycleGate,
 };
 use crate::lifecycle::{Action as LifecycleAction, Continuation, QuitReason, State};
 use crate::rpc::protocol::{
@@ -101,7 +102,7 @@ pub enum AppEffect {
 pub struct ShellDispatcher<P> {
     platform: P,
     broker: RpcProcessBroker,
-    app_events: AppEventAdapter,
+    lifecycle_gate: SharedLifecycleGate,
     broker_cleanup_applied: bool,
 }
 
@@ -115,10 +116,23 @@ impl<P: ShellPlatform> ShellDispatcher<P> {
     /// Creates a dispatcher with an explicit lifecycle platform.
     #[must_use]
     pub fn with_platform(platform: P, broker: RpcProcessBroker, app_platform: Platform) -> Self {
+        Self::with_gate(platform, broker, LifecycleGate::shared(app_platform))
+    }
+
+    /// Creates a dispatcher that shares lifecycle state with native callbacks.
+    ///
+    /// The gate only protects pure reduction.  Platform and broker effects are
+    /// still applied by the dispatcher after each reduction returns.
+    #[must_use]
+    pub fn with_gate(
+        platform: P,
+        broker: RpcProcessBroker,
+        lifecycle_gate: SharedLifecycleGate,
+    ) -> Self {
         Self {
             platform,
             broker,
-            app_events: AppEventAdapter::new(app_platform),
+            lifecycle_gate,
             broker_cleanup_applied: false,
         }
     }
@@ -133,14 +147,30 @@ impl<P: ShellPlatform> ShellDispatcher<P> {
         Self::with_platform(platform, broker, app_platform)
     }
 
+    /// Alias for callers that prefer an explicit shared-gate constructor.
+    #[must_use]
+    pub fn new_with_gate(
+        platform: P,
+        broker: RpcProcessBroker,
+        lifecycle_gate: SharedLifecycleGate,
+    ) -> Self {
+        Self::with_gate(platform, broker, lifecycle_gate)
+    }
+
+    /// Returns the shared lifecycle gate used by this dispatcher.
+    #[must_use]
+    pub fn lifecycle_gate(&self) -> SharedLifecycleGate {
+        std::sync::Arc::clone(&self.lifecycle_gate)
+    }
+
     #[must_use]
     pub fn app_state(&self) -> State {
-        self.app_events.state()
+        self.lifecycle_gate.state()
     }
 
     #[must_use]
     pub fn app_platform(&self) -> Platform {
-        self.app_events.platform()
+        self.lifecycle_gate.platform()
     }
 
     #[must_use]
@@ -248,8 +278,19 @@ impl<P: ShellPlatform> ShellDispatcher<P> {
     /// then `ResidueTerminated` is fed back into the reducer before any
     /// resulting `Run`/`PassThrough` effect is delegated to the platform.
     pub fn dispatch_app_event(&mut self, event: AppEvent) -> Result<AppTransition, RpcError> {
-        let transition = self.app_events.dispatch(event);
+        let transition = self
+            .lifecycle_gate
+            .reduce(event)
+            .map_err(lifecycle_gate_error)?;
         self.apply_app_transition(transition)
+    }
+
+    /// Makes a synchronous native quit decision without borrowing the
+    /// dispatcher or platform lock.  Callers can apply `plan.transition`
+    /// separately after their native callback returns.
+    #[must_use]
+    pub fn native_quit(&self, reason: QuitReason) -> NativeQuitPlan {
+        self.lifecycle_gate.native_quit(reason)
     }
 
     fn apply_app_transition(
@@ -272,7 +313,7 @@ impl<P: ShellPlatform> ShellDispatcher<P> {
                     self.broker_cleanup_applied = true;
                     self.broker.transport_close().map_err(adapter_error)?;
                 }
-                let residue = self.feed_residue_terminated();
+                let residue = self.feed_residue_terminated()?;
                 state = residue.state;
                 // Insert the reducer's continuation immediately after the
                 // cleanup action so it always runs after broker teardown.
@@ -291,20 +332,10 @@ impl<P: ShellPlatform> ShellDispatcher<P> {
         Ok(AppTransition { state, effects })
     }
 
-    fn feed_residue_terminated(&mut self) -> AppTransition {
-        let transition = crate::lifecycle::transition(
-            self.app_events.state(),
-            crate::lifecycle::Event::ResidueTerminated,
-        );
-        self.app_events = AppEventAdapter::with_state(self.app_events.platform(), transition.state);
-        AppTransition {
-            state: transition.state,
-            effects: transition
-                .actions
-                .into_iter()
-                .map(AppEventEffect::Lifecycle)
-                .collect(),
-        }
+    fn feed_residue_terminated(&self) -> Result<AppTransition, RpcError> {
+        self.lifecycle_gate
+            .residue_terminated()
+            .map_err(lifecycle_gate_error)
     }
 
     /// Handles a host notification and returns native failures to the caller.
@@ -645,11 +676,21 @@ fn adapter_error(error: RpcAdapterError) -> RpcError {
     }
 }
 
+fn lifecycle_gate_error(error: LifecycleGateError) -> RpcError {
+    RpcError {
+        code: -32000,
+        message: error.to_string(),
+        data: Some(RpcErrorData {
+            kind: RpcErrorKind::Platform,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app_events::{AppEvent, NativeEvent};
-    use crate::host::{BrokerConfig, ProcessBroker};
+    use crate::host::{BrokerConfig, LifecycleGateError, ProcessBroker, SharedLifecycleGate};
     use crate::lifecycle::{Continuation, QuitReason};
     use crate::rpc::protocol::{
         JsonRpcVersion, ProcessKind, ProcessStreamMode, RpcId, UpdaterInstallParams,
@@ -663,6 +704,8 @@ mod tests {
         fail_window_notifications: bool,
         fail_clipboard: bool,
         lifecycle_platform: Platform,
+        effect_gate: Option<SharedLifecycleGate>,
+        effect_gate_state: Option<Result<State, LifecycleGateError>>,
     }
 
     impl Default for FakePlatform {
@@ -674,6 +717,8 @@ mod tests {
                 fail_window_notifications: false,
                 fail_clipboard: false,
                 lifecycle_platform: Platform::Linux,
+                effect_gate: None,
+                effect_gate_state: None,
             }
         }
     }
@@ -773,6 +818,9 @@ mod tests {
         }
 
         fn apply_app_effect(&mut self, effect: AppEffect) -> Result<(), String> {
+            if let Some(gate) = &self.effect_gate {
+                self.effect_gate_state = Some(gate.try_state());
+            }
             self.app_effects.push(effect);
             Ok(())
         }
@@ -1118,6 +1166,29 @@ mod tests {
             assert_eq!(dispatch.app_state(), State::Running);
             assert!(app_effects(&dispatch).is_empty());
         }
+    }
+
+    #[test]
+    fn platform_effects_run_after_the_lifecycle_gate_lock_is_released() {
+        let gate = LifecycleGate::shared(Platform::Linux);
+        let platform = FakePlatform {
+            effect_gate: Some(std::sync::Arc::clone(&gate)),
+            ..FakePlatform::default()
+        };
+        let mut dispatch = ShellDispatcher::with_gate(
+            platform,
+            RpcProcessBroker::new(ProcessBroker::new(BrokerConfig::default())),
+            gate,
+        );
+
+        dispatch
+            .dispatch_app_event(AppEvent::Native(NativeEvent::LastWindowClosed))
+            .expect("last-window reduction should succeed");
+
+        assert_eq!(
+            dispatch.platform.effect_gate_state,
+            Some(Ok(State::Running))
+        );
     }
 
     #[test]

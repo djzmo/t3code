@@ -8,6 +8,7 @@
 
 mod broker;
 mod identity;
+pub mod lifecycle_gate;
 pub mod rpc_adapter;
 pub mod shell_dispatch;
 pub mod sidecar;
@@ -20,6 +21,9 @@ pub use broker::{
 pub use identity::{
     IdentityBackend, IdentityError, IdentityProof, NativeIdentityBackend, ProcessIdentity,
     TerminateResult, UnprovenIdentityBackend,
+};
+pub use lifecycle_gate::{
+    LifecycleGate, LifecycleGateError, NativeQuitDecision, NativeQuitPlan, SharedLifecycleGate,
 };
 pub use rpc_adapter::{RpcBrokerEventReceiver, RpcProcessBroker};
 pub use shell_dispatch::{AppEffect, ShellDispatcher, ShellPlatform};
