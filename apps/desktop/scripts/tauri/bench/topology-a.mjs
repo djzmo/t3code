@@ -448,13 +448,12 @@ export function assertTopologyACriteria(result) {
 }
 
 /**
- * Return a dependency-free renderer source.  A caller supplies
- * `globalThis.__NANONI_TOPOLOGY_A_BENCH_ADAPTER__` with the adapter methods
- * documented above; this keeps the source usable by an evaluateScript call
- * without importing a Tauri plugin into the benchmark core.
+ * Return a dependency-free renderer source.  The evaluated function binds to
+ * the real init-script bridge, so Pilot exercises the same renderer → Tauri →
+ * host path as the application.  No benchmark-only global adapter is needed.
  */
 const rendererEvaluation = async function topologyARendererEvaluation() {
-  const adapter = globalThis.__NANONI_TOPOLOGY_A_BENCH_ADAPTER__;
+  const desktopBridge = globalThis.desktopBridge;
   const channel = "desktop:phase0-topology-a-bench";
   const pushChannel = "desktop:menu-action";
   const maxBytes = 1_048_576;
@@ -479,17 +478,117 @@ const rendererEvaluation = async function topologyARendererEvaluation() {
     message: error instanceof Error ? error.message : String(error),
     details: {},
   });
-  const invoke = (payload) => {
-    if (!adapter || typeof adapter.invoke !== "function") {
-      throw new Error("Topology A renderer adapter is missing");
+  const invokeBridge = (payload) => {
+    if (!desktopBridge || typeof desktopBridge !== "object") {
+      throw new Error("Topology A desktop bridge is missing");
     }
-    return adapter.invoke("host_invoke", { channel, payload });
+    if (typeof desktopBridge.invoke === "function") {
+      return desktopBridge.invoke(channel, payload);
+    }
+    const internals = globalThis.__TAURI_INTERNALS__;
+    if (!internals || typeof internals.invoke !== "function") {
+      throw new Error("Topology A desktop bridge has no invoke path");
+    }
+    // The Phase 0 shim exposes named DesktopBridge methods rather than a
+    // generic invoke member. Keep the benchmark call expressed as
+    // `desktopBridge.invoke` while adapting that existing init-script boundary
+    // locally for the real renderer.
+    return internals.invoke("host_invoke", { channel, payload });
+  };
+  const invoke = (payload) => {
+    return invokeBridge(payload);
   };
   const waitForEvents = async () => {
     const ready = globalThis.__NANONI_EVENTS_READY__;
     if (ready === undefined || (await ready) !== true) {
       throw new Error("Topology A desktop event channel is not ready");
     }
+  };
+  const readSnapshot = () => {
+    if (!desktopBridge || typeof desktopBridge !== "object") {
+      throw new Error("Topology A desktop bridge is missing");
+    }
+    const boot = globalThis.__NANONI_BOOT__;
+    if (boot === null || typeof boot !== "object") {
+      throw new Error("Topology A boot snapshot is missing");
+    }
+    if (
+      typeof desktopBridge.getAppBranding !== "function" ||
+      typeof desktopBridge.getSystemLocale !== "function" ||
+      typeof desktopBridge.getLocalEnvironmentBootstraps !== "function"
+    ) {
+      throw new Error("Topology A synchronous bridge getters are missing");
+    }
+    return {
+      boot,
+      sync: {
+        appBranding: desktopBridge.getAppBranding(),
+        systemLocale: desktopBridge.getSystemLocale(),
+        localEnvironmentBootstraps: desktopBridge.getLocalEnvironmentBootstraps(),
+        windowFullscreenState:
+          typeof desktopBridge.getWindowFullscreenState === "function"
+            ? desktopBridge.getWindowFullscreenState()
+            : undefined,
+      },
+    };
+  };
+  const collectPushes = async (run) => {
+    if (typeof desktopBridge?.onMenuAction !== "function") {
+      throw new Error("Topology A desktop bridge push subscription is missing");
+    }
+    const events = [];
+    let resolveEvents;
+    let rejectEvents;
+    const complete = new Promise((resolve, reject) => {
+      resolveEvents = resolve;
+      rejectEvents = reject;
+    });
+    const remove = desktopBridge.onMenuAction((payload) => {
+      try {
+        const value = typeof payload === "string" ? JSON.parse(payload) : payload;
+        if (
+          value === null ||
+          typeof value !== "object" ||
+          !Number.isSafeInteger(value.seq) ||
+          value.seq < 0 ||
+          !Number.isFinite(Number(value.sentAt))
+        ) {
+          throw new Error("invalid ordered push receipt");
+        }
+        events.push({ seq: value.seq, sentAt: Number(value.sentAt), receivedAt: now() });
+        if (events.length === pushCount) resolveEvents();
+        if (events.length > pushCount)
+          rejectEvents(new Error(`received more than ${pushCount} pushes`));
+      } catch (error) {
+        rejectEvents(error);
+      }
+    });
+    let timeout;
+    try {
+      await run();
+      if (events.length < pushCount) {
+        await Promise.race([
+          complete,
+          new Promise((_, reject) => {
+            timeout = setTimeout(
+              () =>
+                reject(
+                  new Error(`timed out waiting for ${pushCount} pushes; received ${events.length}`),
+                ),
+              5_000,
+            );
+          }),
+        ]);
+      }
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+      remove?.();
+    }
+    return {
+      events,
+      sequence: events.map((event) => event.seq),
+      latenciesMs: events.map((event) => event.receivedAt - event.sentAt),
+    };
   };
   const failures = [];
   let echoes = null;
@@ -518,10 +617,7 @@ const rendererEvaluation = async function topologyARendererEvaluation() {
     await waitForEvents();
     const sentAt = [];
     const cadenceStartedAt = now();
-    if (!adapter || typeof adapter.collectPushes !== "function") {
-      throw new Error("Topology A renderer adapter requires collectPushes(listener)");
-    }
-    pushes = await adapter.collectPushes(async () => {
+    pushes = await collectPushes(async () => {
       const sends = [];
       for (let seq = 0; seq < pushCount; seq += 1) {
         const dueAt = cadenceStartedAt + seq * pushIntervalMs;
@@ -576,12 +672,34 @@ const rendererEvaluation = async function topologyARendererEvaluation() {
   } catch (error) {
     failures.push(failure("exact-echo", error));
   }
+  let failureProbe = null;
+  try {
+    let invalidCountRejected = false;
+    try {
+      await invoke({ op: "push", seq: pushCount, sentAt: now() });
+    } catch {
+      invalidCountRejected = true;
+    }
+    let oversizedPayloadRejected = false;
+    try {
+      await invoke({ op: "echo", value: "x".repeat(maxBytes - 1) });
+    } catch {
+      oversizedPayloadRejected = true;
+    }
+    failureProbe = {
+      invalidCountRejected,
+      oversizedPayloadRejected,
+      pass: invalidCountRejected && oversizedPayloadRejected,
+    };
+    if (!failureProbe.pass) {
+      throw new Error("expected invalid-count and oversized-payload requests to be rejected");
+    }
+  } catch (error) {
+    failures.push(failure("failure-probe", error));
+  }
   let snapshot = null;
   try {
-    if (!adapter || typeof adapter.readSnapshot !== "function") {
-      throw new Error("Topology A renderer snapshot adapter is missing");
-    }
-    snapshot = await adapter.readSnapshot();
+    snapshot = readSnapshot();
   } catch (error) {
     failures.push(failure("reload", error));
   }
@@ -593,6 +711,7 @@ const rendererEvaluation = async function topologyARendererEvaluation() {
     pushCadence: pushes?.cadencePass === true,
     pushRate: pushes?.ratePass === true,
     exactPayload: exactEcho?.bytes === maxBytes,
+    failureModes: failureProbe?.pass === true,
     reloadStable: false,
   };
   return {
@@ -603,6 +722,7 @@ const rendererEvaluation = async function topologyARendererEvaluation() {
     echoes,
     pushes,
     exactEcho,
+    failureProbe,
     reload: { before: snapshot, after: null, bootEqual: false, syncEqual: false, stable: false },
     failures,
     phase: "before-reload",
@@ -612,15 +732,37 @@ const rendererEvaluation = async function topologyARendererEvaluation() {
 const rendererPostReloadEvaluation = async function topologyARendererPostReloadEvaluation(
   beforeResult,
 ) {
-  const adapter = globalThis.__NANONI_TOPOLOGY_A_BENCH_ADAPTER__;
+  const desktopBridge = globalThis.desktopBridge;
   const ready = globalThis.__NANONI_EVENTS_READY__;
   if (ready === undefined || (await ready) !== true) {
     throw new Error("Topology A desktop event channel is not ready after reload");
   }
-  if (!adapter || typeof adapter.readSnapshot !== "function") {
-    throw new Error("Topology A renderer snapshot adapter is missing");
+  if (!desktopBridge || typeof desktopBridge !== "object") {
+    throw new Error("Topology A desktop bridge is missing");
   }
-  const after = await adapter.readSnapshot();
+  const boot = globalThis.__NANONI_BOOT__;
+  if (boot === null || typeof boot !== "object") {
+    throw new Error("Topology A boot snapshot is missing");
+  }
+  if (
+    typeof desktopBridge.getAppBranding !== "function" ||
+    typeof desktopBridge.getSystemLocale !== "function" ||
+    typeof desktopBridge.getLocalEnvironmentBootstraps !== "function"
+  ) {
+    throw new Error("Topology A synchronous bridge getters are missing");
+  }
+  const after = {
+    boot,
+    sync: {
+      appBranding: desktopBridge.getAppBranding(),
+      systemLocale: desktopBridge.getSystemLocale(),
+      localEnvironmentBootstraps: desktopBridge.getLocalEnvironmentBootstraps(),
+      windowFullscreenState:
+        typeof desktopBridge.getWindowFullscreenState === "function"
+          ? desktopBridge.getWindowFullscreenState()
+          : undefined,
+    },
+  };
   const before = beforeResult?.reload?.before;
   if (!before || typeof before !== "object" || !after || typeof after !== "object") {
     throw new Error("Topology A pre-reload result and snapshots are required");

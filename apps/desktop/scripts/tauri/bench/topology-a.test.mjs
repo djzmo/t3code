@@ -35,9 +35,17 @@ const makeAdapter = ({ brokenPushOrder = false, failEcho = false, delayedPushMs 
       clock += 1;
       if (payload.op === "echo") {
         if (failEcho) throw new Error("fake echo failure");
+        if (
+          new TextEncoder().encode(JSON.stringify(payload.value)).byteLength > TOPOLOGY_A_MAX_BYTES
+        ) {
+          throw new Error("Topology A benchmark echo exceeds 1048576 bytes.");
+        }
         return { value: payload.value };
       }
       if (payload.op === "push") {
+        if (payload.seq < 0 || payload.seq >= TOPOLOGY_A_PUSH_COUNT) {
+          throw new Error("Invalid Topology A benchmark request.");
+        }
         const seq = brokenPushOrder ? TOPOLOGY_A_PUSH_COUNT - 1 - payload.seq : payload.seq;
         const deliver = () => {
           for (const listener of listeners) {
@@ -73,41 +81,43 @@ const rejects = async (run, pattern) => {
   }
 };
 
-const executeRendererSource = async (source, adapter, ready = Promise.resolve(true)) => {
-  const previousAdapter = globalThis.__NANONI_TOPOLOGY_A_BENCH_ADAPTER__;
+const executeRendererSource = async (
+  source,
+  desktopBridge,
+  ready = Promise.resolve(true),
+  boot = { productVersion: "1.0.0" },
+  tauriInternals,
+) => {
+  const previousBridge = globalThis.desktopBridge;
   const previousReady = globalThis.__NANONI_EVENTS_READY__;
-  globalThis.__NANONI_TOPOLOGY_A_BENCH_ADAPTER__ = adapter;
+  const previousBoot = globalThis.__NANONI_BOOT__;
+  const previousInternals = globalThis.__TAURI_INTERNALS__;
+  globalThis.desktopBridge = desktopBridge;
   globalThis.__NANONI_EVENTS_READY__ = ready;
+  globalThis.__NANONI_BOOT__ = boot;
+  if (tauriInternals === undefined) delete globalThis.__TAURI_INTERNALS__;
+  else globalThis.__TAURI_INTERNALS__ = tauriInternals;
   try {
     return await new Function(`return ${source}`)();
   } finally {
-    if (previousAdapter === undefined) delete globalThis.__NANONI_TOPOLOGY_A_BENCH_ADAPTER__;
-    else globalThis.__NANONI_TOPOLOGY_A_BENCH_ADAPTER__ = previousAdapter;
+    if (previousBridge === undefined) delete globalThis.desktopBridge;
+    else globalThis.desktopBridge = previousBridge;
     if (previousReady === undefined) delete globalThis.__NANONI_EVENTS_READY__;
     else globalThis.__NANONI_EVENTS_READY__ = previousReady;
+    if (previousBoot === undefined) delete globalThis.__NANONI_BOOT__;
+    else globalThis.__NANONI_BOOT__ = previousBoot;
+    if (previousInternals === undefined) delete globalThis.__TAURI_INTERNALS__;
+    else globalThis.__TAURI_INTERNALS__ = previousInternals;
   }
 };
 
-const makeRendererAdapter = (core) => ({
-  invoke: (_command, request) => core.invoke(request.payload),
-  collectPushes: async (run) => {
-    const events = [];
-    const remove = core.subscribePush((event) => {
-      const payload = JSON.parse(event.payload);
-      events.push({ ...payload, receivedAt: performance.now() });
-    });
-    try {
-      await run();
-    } finally {
-      remove();
-    }
-    return {
-      events,
-      sequence: events.map((event) => event.seq),
-      latenciesMs: events.map((event) => event.receivedAt - event.sentAt),
-    };
-  },
-  readSnapshot: () => core.readSnapshot(),
+const makeRendererBridge = (core) => ({
+  invoke: (_channel, payload) => core.invoke(payload),
+  onMenuAction: (listener) => core.subscribePush((event) => listener(event.payload)),
+  getAppBranding: () => null,
+  getSystemLocale: () => "en-US",
+  getLocalEnvironmentBootstraps: () => [],
+  getWindowFullscreenState: () => false,
 });
 
 describe("Topology A benchmark core", () => {
@@ -184,10 +194,11 @@ describe("Topology A benchmark core", () => {
 
   it("executes the renderer evaluation source with the canonical result shape", async () => {
     const core = makeAdapter();
-    const result = await executeRendererSource(
-      createRendererEvaluationSource(),
-      makeRendererAdapter(core),
-    );
+    const source = createRendererEvaluationSource();
+    assert.notInclude(source, "__NANONI_TOPOLOGY_A_BENCH_ADAPTER__");
+    assert.include(source, "desktopBridge.invoke");
+    assert.include(source, "desktopBridge.onMenuAction");
+    const result = await executeRendererSource(source, makeRendererBridge(core));
     assert.equal(result.schemaVersion, 1);
     assert.equal(result.channel, TOPOLOGY_A_CHANNEL);
     assert.equal(result.phase, "before-reload");
@@ -198,7 +209,53 @@ describe("Topology A benchmark core", () => {
     assert.isTrue(result.pushes.cadencePass);
     assert.isTrue(result.pushes.ratePass);
     assert.equal(result.exactEcho.bytes, TOPOLOGY_A_MAX_BYTES);
+    assert.deepEqual(result.failureProbe, {
+      invalidCountRejected: true,
+      oversizedPayloadRejected: true,
+      pass: true,
+    });
+    assert.isTrue(result.criteria.failureModes);
     assert.isFalse(result.pass);
+    assert.deepEqual(result.failures, []);
+  });
+
+  it("uses the Tauri host invoke boundary when the real bridge has named methods only", async () => {
+    const core = makeAdapter();
+    const bridge = makeRendererBridge(core);
+    delete bridge.invoke;
+    const calls = [];
+    const tauriInternals = {
+      invoke(command, args) {
+        calls.push([command, args]);
+        return core.invoke(args.payload);
+      },
+    };
+
+    const result = await executeRendererSource(
+      createRendererEvaluationSource(),
+      bridge,
+      Promise.resolve(true),
+      { productVersion: "1.0.0" },
+      tauriInternals,
+    );
+
+    assert.equal(calls.length, TOPOLOGY_A_ECHO_COUNT + TOPOLOGY_A_PUSH_COUNT + 3);
+    for (const [command, args] of calls) {
+      assert.equal(command, "host_invoke");
+      assert.deepEqual(Object.keys(args).sort(), ["channel", "payload"]);
+      assert.equal(args.channel, TOPOLOGY_A_CHANNEL);
+    }
+    assert.equal(calls.filter(([, { payload }]) => payload.op === "push").length, 101);
+    assert.equal(calls.filter(([, { payload }]) => payload.op === "echo").length, 1_002);
+    assert.equal(result.echoes.count, TOPOLOGY_A_ECHO_COUNT);
+    assert.equal(result.pushes.count, TOPOLOGY_A_PUSH_COUNT);
+    assert.isTrue(result.pushes.ordered);
+    assert.equal(result.exactEcho.bytes, TOPOLOGY_A_MAX_BYTES);
+    assert.deepEqual(result.failureProbe, {
+      invalidCountRejected: true,
+      oversizedPayloadRejected: true,
+      pass: true,
+    });
     assert.deepEqual(result.failures, []);
   });
 
@@ -209,13 +266,13 @@ describe("Topology A benchmark core", () => {
     const ready = new Promise((resolve) => {
       release = resolve;
     });
-    const adapter = makeRendererAdapter(core);
-    const originalCollect = adapter.collectPushes;
-    adapter.collectPushes = async (...args) => {
+    const bridge = makeRendererBridge(core);
+    const originalSubscribe = bridge.onMenuAction;
+    bridge.onMenuAction = (listener) => {
       order.push("push");
-      return originalCollect(...args);
+      return originalSubscribe(listener);
     };
-    const running = executeRendererSource(createRendererEvaluationSource(), adapter, ready);
+    const running = executeRendererSource(createRendererEvaluationSource(), bridge, ready);
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.deepEqual(order, []);
     release(true);
@@ -224,7 +281,7 @@ describe("Topology A benchmark core", () => {
 
     const notReady = await executeRendererSource(
       createRendererEvaluationSource(),
-      adapter,
+      bridge,
       Promise.resolve(false),
     );
     assert.isFalse(notReady.criteria.pushCount);
@@ -236,7 +293,7 @@ describe("Topology A benchmark core", () => {
     });
     const postRunning = executeRendererSource(
       createRendererPostReloadSource(before),
-      adapter,
+      bridge,
       postGate,
     );
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -251,7 +308,7 @@ describe("Topology A benchmark core", () => {
       () =>
         executeRendererSource(
           createRendererPostReloadSource(before),
-          adapter,
+          bridge,
           Promise.resolve(false),
         ),
       /not ready after reload/,
