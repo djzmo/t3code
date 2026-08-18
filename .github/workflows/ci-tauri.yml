@@ -46,6 +46,7 @@ jobs:
           vp test run
           apps/desktop/src/tauri/rpc/protocol.test.ts
           apps/desktop/src/tauri/__tests__/host.integration.test.ts
+          apps/desktop/src/tauri/__tests__/updater-lifecycle.integration.test.ts
           apps/desktop/src/tauri/process/BrokeredChildSpawner.test.ts
           apps/desktop/scripts/tauri/smoke-test.test.mjs
           scripts/build-tauri-artifact.test.ts
@@ -55,7 +56,9 @@ jobs:
           scripts/fetch-node-sidecar.test.ts
           scripts/tauri/check-remote-cli-pin.test.ts
           scripts/tauri/check-toolchain-alignment.test.ts
+          scripts/tauri/release-yml-guard.test.ts
           scripts/tauri/version-grammar.test.ts
+          scripts/tauri/version-skew-matrix.test.ts
 
       - name: Verify immutable remote CLI pin
         env:
