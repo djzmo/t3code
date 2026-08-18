@@ -23,7 +23,7 @@ Evidence current on 2026-08-19:
 | V2        | The gated real-bridge benchmark now measures 1,000 round trips, 100 renderer-scheduled pushes, exact 1 MiB throughput, reload stability, and failure behavior without synthetic timing. No performance result is claimed yet.                                        | Run the benchmark through Tauri Pilot on WebView2, WKWebView, and WebKitGTK and record the measured criteria.                                                        |
 | V3a       | Exact remote CLI/version pins, grammar, computed closure, npm surface, and fallback policy are implemented. The live registry and Sigstore/SLSA verification passed on 2026-08-18.                                                                                   | Exercise one pinned SSH provisioning pass.                                                                                                                           |
 | V3b       | Boot metadata and version-skew tests are implemented.                                                                                                                                                                                                                | Confirm all values at first evaluation in the packaged UI.                                                                                                           |
-| V4-final  | On commit `54b77d949756cbaa16616f5be03f6ff8280f4dc0`, the unsigned Windows release build produced a 10,735,104-byte executable, a 75,366,767-byte MSI, and a 48,195,106-byte NSIS installer.                                                                         | Rebuild from the final commit on all three operating systems, run smokes, boot WSL from packaged resources, and launch the AppImage on a newer Wayland distribution. |
+| V4-final  | On commit `5a7cb3fc5a9c0c8353ccb29e6ac3346bae8ee143`, the unsigned Windows release build produced a 10,705,408-byte executable, a 75,346,287-byte MSI, and a 48,198,952-byte NSIS installer. The validated stage contained 1,194 files totaling 241,149,467 bytes.   | Rebuild from the final commit on all three operating systems, run smokes, boot WSL from packaged resources, and launch the AppImage on a newer Wayland distribution. |
 | V5        | This evidence ledger and the measurement schema exist.                                                                                                                                                                                                               | Fill the final measurements, compatibility findings, V2/V3 outcomes, remote-readiness result, and timed upstream-tag merge.                                          |
 
 The current Windows runtime boundary is explicit: the Node server bootstrap is
@@ -31,6 +31,17 @@ configured for fd 3 with optional telemetry on fd 4/fd 5, while the native
 Windows broker cannot construct Node/libuv's additional CRT descriptor table.
 Windows packaged smoke remains pending until the owner approves either a
 Windows stdin bootstrap exception or a larger native launcher.
+
+The current Windows release artifact hashes are:
+
+- executable: `0C89003A9D7B83B8A117E509762840750390890D5E9F3C5E72CE70CC2527C34E`;
+- MSI: `3C188C88FC423B8FA2E95E41213A41F5E962869732184E83B60AC736F6B3F635`;
+- NSIS: `515A1634D33D07DB79A58CB8ACAF67C44599A6A503BF085EFC84BC43F08D7811`.
+
+This release was built with the repository's pinned Node 24 runtime first on
+the subprocess `PATH`; the host machine's Node 22 installation remained later
+on `PATH`. This proves the artifact wrapper no longer allows nested Vite or
+package scripts to silently select the unsupported system runtime.
 
 ## Identity
 
