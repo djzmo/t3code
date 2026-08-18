@@ -96,6 +96,31 @@ describe("JsonRpcPeer", () => {
     assert.equal(written.length, 2);
   });
 
+  it("aborts an active inbound handler and suppresses its late response", async () => {
+    const { left, right } = pair();
+    let handlerSignal: AbortSignal | undefined;
+    right.onRequest("window.getBounds", async (_params, context) => {
+      handlerSignal = context.signal;
+      await new Promise<void>((resolve) =>
+        context.signal.addEventListener("abort", () => resolve()),
+      );
+      return { x: 0, y: 0, width: 800, height: 600 };
+    });
+    const controller = new AbortController();
+    const pending = left.request("window.getBounds", { label: "main" }, controller.signal);
+    await Promise.resolve();
+    controller.abort();
+
+    const error = await pending.then(
+      () => undefined,
+      (cause: unknown) => cause,
+    );
+    await Promise.resolve();
+    assert.instanceOf(error, JsonRpcPeerError);
+    assert.equal(handlerSignal?.aborted, true);
+    assert.equal(left.pendingCount, 0);
+  });
+
   it("rejects all pending requests when the transport closes", async () => {
     const peer = new JsonRpcPeer({ write: () => undefined });
     const pending = peer.request("window.getBounds", { label: "main" });

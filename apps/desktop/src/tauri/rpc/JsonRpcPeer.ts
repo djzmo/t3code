@@ -32,7 +32,15 @@ export interface JsonRpcPeerTransport {
   readonly write: (frame: Uint8Array) => void | Promise<void>;
 }
 
-export type JsonRpcRequestHandler = (params: unknown) => unknown | Promise<unknown>;
+export interface JsonRpcRequestContext {
+  readonly id: number;
+  readonly signal: AbortSignal;
+}
+
+export type JsonRpcRequestHandler = (
+  params: unknown,
+  context: JsonRpcRequestContext,
+) => unknown | Promise<unknown>;
 export type JsonRpcNotificationHandler = (params: unknown) => void | Promise<void>;
 
 interface PendingRequest {
@@ -121,6 +129,7 @@ export class JsonRpcPeer {
   readonly #transport: JsonRpcPeerTransport;
   readonly #decoder = new FrameDecoder();
   readonly #pending = new Map<JsonRpcId, PendingRequest>();
+  readonly #activeRequests = new Map<JsonRpcId, AbortController>();
   readonly #requests = new Map<RpcMethod, JsonRpcRequestHandler>();
   readonly #notifications = new Map<RpcMethod, Set<JsonRpcNotificationHandler>>();
   #nextId = 1;
@@ -196,6 +205,8 @@ export class JsonRpcPeer {
     this.#closed = cause;
     for (const pending of this.#pending.values()) pending.reject(cause);
     this.#pending.clear();
+    for (const controller of this.#activeRequests.values()) controller.abort(cause);
+    this.#activeRequests.clear();
   }
 
   #assertOpen(): void {
@@ -224,14 +235,22 @@ export class JsonRpcPeer {
       this.#dispatchResponse(raw);
       return;
     }
-    if (raw.method === "$/cancel") return;
+    if (raw.method === "$/cancel") {
+      const id = (raw.params as { readonly id?: unknown } | undefined)?.id;
+      if (typeof id === "number" && Number.isSafeInteger(id)) {
+        this.#activeRequests
+          .get(id)
+          ?.abort(new JsonRpcPeerError(`JSON-RPC request ${id} was cancelled.`));
+      }
+      return;
+    }
     const envelope = decodeEnvelope(raw);
     if (!("method" in envelope)) return;
     if ("id" in envelope) {
       if (typeof envelope.id !== "number") {
         throw new JsonRpcPeerError("Invalid JSON-RPC request id.");
       }
-      await this.#dispatchRequest(envelope.id, envelope.method, envelope.params);
+      void this.#dispatchRequest(envelope.id, envelope.method, envelope.params);
       return;
     }
     const handlers = this.#notifications.get(envelope.method);
@@ -267,6 +286,17 @@ export class JsonRpcPeer {
   }
 
   async #dispatchRequest(id: number, method: RpcMethod, params: unknown): Promise<void> {
+    if (this.#activeRequests.size >= MAX_PENDING_REQUESTS) {
+      await this.#write({
+        jsonrpc: "2.0",
+        id,
+        error: {
+          code: RPC_ERROR_CODES.platform,
+          message: "JSON-RPC active request limit reached.",
+        },
+      });
+      return;
+    }
     const handler = this.#requests.get(method);
     if (handler === undefined) {
       await this.#write({
@@ -276,10 +306,14 @@ export class JsonRpcPeer {
       });
       return;
     }
+    const controller = new AbortController();
+    this.#activeRequests.set(id, controller);
     try {
-      const result = await handler(params);
+      const result = await handler(params, { id, signal: controller.signal });
+      if (controller.signal.aborted || this.#closed !== undefined) return;
       await this.#write({ jsonrpc: "2.0", id, result });
     } catch (cause) {
+      if (controller.signal.aborted || this.#closed !== undefined) return;
       await this.#write({
         jsonrpc: "2.0",
         id,
@@ -289,6 +323,8 @@ export class JsonRpcPeer {
           data: { kind: "platform" },
         },
       });
+    } finally {
+      if (this.#activeRequests.get(id) === controller) this.#activeRequests.delete(id);
     }
   }
 }
