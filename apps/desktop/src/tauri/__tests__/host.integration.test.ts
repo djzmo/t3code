@@ -113,7 +113,6 @@ it.live.skipIf(!existsSync(serverEntryPath))(
         platform: process.platform,
         processArch: process.arch,
         identity,
-        packageSpec: "t3@0.0.34-nightly.20260817.1116",
         ports: {
           app: fake.app,
           dialog: {

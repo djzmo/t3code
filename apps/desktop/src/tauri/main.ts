@@ -95,7 +95,6 @@ export interface TauriHostEnvironmentOptions {
 
 export interface TauriHostOptions extends TauriHostEnvironmentOptions {
   readonly ports: TauriHostPorts;
-  readonly packageSpec: string;
   readonly nodeEngineRange?: string;
   readonly protocolVersion?: string;
 }
@@ -110,7 +109,6 @@ const resolveSshRunner = (
     ...(Option.isSome(environment.devRemoteT3ServerEntryPath)
       ? { devRemoteEntryPath: environment.devRemoteT3ServerEntryPath.value }
       : {}),
-    packageSpec: options.packageSpec,
     nodeEngineRange: options.nodeEngineRange ?? serverPackageJson.engines.node,
   });
 

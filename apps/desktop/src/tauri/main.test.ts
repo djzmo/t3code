@@ -30,7 +30,6 @@ const runtimeLayer = makeDesktopRuntimeLayer({
     userDataDirName: "agent-nanoni-dev",
     legacyUserDataDirName: "Agent Nanoni (Dev)",
   },
-  packageSpec: "t3@0.0.34-nightly.20260817.1116",
   ports: {
     app: fake.app,
     dialog: {

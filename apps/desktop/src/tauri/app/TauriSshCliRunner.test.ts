@@ -3,29 +3,41 @@ import { readFileSync } from "node:fs";
 
 import { assert, describe, it } from "@effect/vitest";
 
-import { resolveTauriSshCliRunner } from "./TauriSshCliRunner.ts";
+import {
+  REMOTE_CLI_PIN,
+  resolveRemoteCliPin,
+  resolveTauriSshCliRunner,
+} from "./TauriSshCliRunner.ts";
 
 describe("resolveTauriSshCliRunner", () => {
-  it("uses the supplied package and engine range for packaged hosts", () => {
+  it("consumes the exact package pin from remote-cli.json for packaged hosts", () => {
     assert.deepEqual(
       resolveTauriSshCliRunner({
         isDevelopment: false,
-        packageSpec: "t3@0.0.34-nightly.20260817.1116",
         nodeEngineRange: ">=20.0.0",
       }),
       {
-        packageSpec: "t3@0.0.34-nightly.20260817.1116",
+        packageSpec: REMOTE_CLI_PIN.packageSpec,
         nodeEngineRange: ">=20.0.0",
       },
     );
   });
 
-  it("preserves a development entry path and does not include a package fallback", () => {
+  it("rejects a packaged override that differs from the canonical pin", () => {
+    assert.throws(() =>
+      resolveTauriSshCliRunner({
+        isDevelopment: false,
+        packageSpec: "t3@latest",
+        nodeEngineRange: ">=20.0.0",
+      }),
+    );
+  });
+
+  it("preserves a development entry path without a package fallback", () => {
     assert.deepEqual(
       resolveTauriSshCliRunner({
         isDevelopment: true,
         devRemoteEntryPath: "  D:/work/apps/server/dist/bin.mjs  ",
-        packageSpec: "t3@0.0.34-nightly.20260817.1116",
         nodeEngineRange: " >=20.0.0 ",
       }),
       {
@@ -35,22 +47,21 @@ describe("resolveTauriSshCliRunner", () => {
     );
   });
 
-  it("falls back to the supplied package when the development entry is empty", () => {
+  it("uses the canonical package when the development entry is empty", () => {
     assert.deepEqual(
       resolveTauriSshCliRunner({
         isDevelopment: true,
         devRemoteEntryPath: "  ",
-        packageSpec: "t3@0.0.34-nightly.20260817.1116",
         nodeEngineRange: ">=20.0.0",
       }),
       {
-        packageSpec: "t3@0.0.34-nightly.20260817.1116",
+        packageSpec: REMOTE_CLI_PIN.packageSpec,
         nodeEngineRange: ">=20.0.0",
       },
     );
   });
 
-  it("rejects empty package and engine values instead of falling back to latest", () => {
+  it("rejects an empty package override and engine range", () => {
     assert.throws(() =>
       resolveTauriSshCliRunner({
         isDevelopment: false,
@@ -61,8 +72,23 @@ describe("resolveTauriSshCliRunner", () => {
     assert.throws(() =>
       resolveTauriSshCliRunner({
         isDevelopment: false,
-        packageSpec: "t3@0.0.34-nightly.20260817.1116",
         nodeEngineRange: "\t",
+      }),
+    );
+  });
+
+  it("derives the compatible server version from the exact upstream tag", () => {
+    assert.deepEqual(resolveRemoteCliPin(REMOTE_CLI_PIN), {
+      ...REMOTE_CLI_PIN,
+      compatibleServerVersion: "0.0.34-nightly.20260817.1116",
+    });
+  });
+
+  it("rejects a package pin that is not the stripped upstream tag", () => {
+    assert.throws(() =>
+      resolveRemoteCliPin({
+        upstreamTag: "v1.2.3",
+        packageSpec: "t3@1.2.4",
       }),
     );
   });
