@@ -80,6 +80,18 @@ export function assertClerkAbsent(environment) {
   }
 }
 
+export function assertSupportedSidecarNode(version = process.versions.node) {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-|$)/.exec(version);
+  const major = Number(match?.[1]);
+  const minor = Number(match?.[2]);
+  const patch = Number(match?.[3]);
+  if (major !== 24 || minor < 13 || (minor === 13 && patch < 1)) {
+    throw new Error(
+      `Tauri development requires Node 24.13.1 or newer in the Node 24 line; received ${version}.`,
+    );
+  }
+}
+
 export const DEV_WEB_GRAPH_ARGS = [
   "run",
   "--filter=@t3tools/contracts",
@@ -206,6 +218,7 @@ function waitForExit(child) {
 
 async function run() {
   const environment = resolveHostEnvironment(process.env);
+  assertSupportedSidecarNode();
   assertClerkAbsent(environment);
 
   const canonicalPath = resolveCanonicalWorktreePath();

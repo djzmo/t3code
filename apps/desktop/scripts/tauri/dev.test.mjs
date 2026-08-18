@@ -3,6 +3,7 @@ import { assert, describe, it } from "vite-plus/test";
 import {
   DEV_WEB_GRAPH_ARGS,
   assertClerkAbsent,
+  assertSupportedSidecarNode,
   createDevelopmentOverlay,
   createSpawnOptions,
   findClerkConfiguration,
@@ -63,6 +64,15 @@ describe("Tauri development launcher", () => {
       /T3CODE_CLERK_PUBLISHABLE_KEY/,
     );
     assert.doesNotThrow(() => assertClerkAbsent({}));
+  });
+
+  it("rejects a host runtime that cannot execute the Node 24 server bundle", () => {
+    assert.doesNotThrow(() => assertSupportedSidecarNode("24.13.1"));
+    assert.doesNotThrow(() => assertSupportedSidecarNode("24.19.0"));
+    assert.throws(() => assertSupportedSidecarNode("24.13.0"), /requires Node 24\.13\.1/);
+    assert.throws(() => assertSupportedSidecarNode("22.14.0"), /requires Node 24\.13\.1/);
+    assert.throws(() => assertSupportedSidecarNode("25.0.0"), /requires Node 24\.13\.1/);
+    assert.throws(() => assertSupportedSidecarNode("invalid"), /requires Node 24\.13\.1/);
   });
 
   it("builds the existing web graph and Tauri command without launching them", () => {
