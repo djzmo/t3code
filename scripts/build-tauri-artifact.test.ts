@@ -8,10 +8,12 @@ import {
   TauriArtifactError,
   buildTauriArtifact,
   createTauriConfigOverlay,
+  inspectTauriArtifactPayload,
   parseTauriArtifactArguments,
   resolveNodeSidecarDestination,
   resolveNodeSidecarSourceName,
 } from "./build-tauri-artifact.ts";
+import { stageTauriResources } from "./lib/tauri-stage.ts";
 
 const temporaryRoots: string[] = [];
 
@@ -116,6 +118,24 @@ describe("Tauri artifact orchestration", () => {
     expect(Object.keys(result.configOverlay.bundle.resources)[0]).toBe(
       `${NodePath.resolve(fixture.stage)}${NodePath.sep}`,
     );
+    const expectedBytes = (
+      await Promise.all(
+        [
+          NodePath.join(fixture.server, "apps/server/dist/bin.mjs"),
+          fixture.host,
+          fixture.monitor,
+          fixture.node,
+          fixture.nodeLicense,
+        ].map(async (path) => (await NodeFS.stat(path)).size),
+      )
+    ).reduce((total, size) => total + size, 0);
+    expect(result.payload).toEqual({
+      fileCount: 5,
+      regularFileCount: 5,
+      symlinkCount: 0,
+      directoryCount: 8,
+      regularFileBytes: expectedBytes,
+    });
     expect(builds).toHaveLength(1);
     expect(smokes.map(({ variant }) => variant)).toEqual(["normal", "forced-kill"]);
     expect(smokes[0]?.environment).toMatchObject({
@@ -126,6 +146,112 @@ describe("Tauri artifact orchestration", () => {
       AGENT_NANONI_SMOKE: "1",
     });
     expect(smokes[1]?.environment).toMatchObject({ AGENT_NANONI_SMOKE_KILL_HOST: "1" });
+  });
+
+  it("fails the file-count budget before build or smoke", async () => {
+    const fixture = await makeFixture();
+    const calls: string[] = [];
+
+    await expect(
+      buildTauriArtifact({
+        platform: "linux",
+        arch: "x64",
+        stageRoot: fixture.stage,
+        frontendDist: fixture.frontend,
+        serverClosurePath: fixture.server,
+        hostBundlePath: fixture.host,
+        nodeSidecarPath: fixture.node,
+        nodeLicensePath: fixture.nodeLicense,
+        resourceMonitorPath: fixture.monitor,
+        dependencies: {
+          resolveMetadata: () => metadata,
+          payloadBudgetLimits: { maxFileCount: 4 },
+          build: () => {
+            calls.push("build");
+          },
+          smoke: () => {
+            calls.push("smoke");
+          },
+        },
+      }),
+    ).rejects.toMatchObject<TauriArtifactError>({ code: "payload-budget-exceeded" });
+    expect(calls).toEqual([]);
+  });
+
+  it("fails the regular-file byte budget before build or smoke", async () => {
+    const fixture = await makeFixture();
+    const calls: string[] = [];
+
+    await expect(
+      buildTauriArtifact({
+        platform: "linux",
+        arch: "x64",
+        stageRoot: fixture.stage,
+        frontendDist: fixture.frontend,
+        serverClosurePath: fixture.server,
+        hostBundlePath: fixture.host,
+        nodeSidecarPath: fixture.node,
+        nodeLicensePath: fixture.nodeLicense,
+        resourceMonitorPath: fixture.monitor,
+        dependencies: {
+          resolveMetadata: () => metadata,
+          payloadBudgetLimits: { maxRegularFileBytes: 0 },
+          build: () => {
+            calls.push("build");
+          },
+          smoke: () => {
+            calls.push("smoke");
+          },
+        },
+      }),
+    ).rejects.toMatchObject<TauriArtifactError>({ code: "payload-budget-exceeded" });
+    expect(calls).toEqual([]);
+  });
+
+  it("counts safe symlinks without following them and rejects links outside the stage", async () => {
+    const fixture = await makeFixture();
+    const outside = NodePath.join(fixture.root, "outside.txt");
+    await NodeFS.writeFile(outside, "outside payload\n");
+    const staged = await buildTauriArtifact({
+      platform: "linux",
+      arch: "x64",
+      stageRoot: fixture.stage,
+      frontendDist: fixture.frontend,
+      serverClosurePath: fixture.server,
+      hostBundlePath: fixture.host,
+      nodeSidecarPath: fixture.node,
+      nodeLicensePath: fixture.nodeLicense,
+      resourceMonitorPath: fixture.monitor,
+      dependencies: {
+        resolveMetadata: () => metadata,
+        assertClerkAbsent: async () => undefined,
+        stageResources: async (input) => {
+          const result = await stageTauriResources(input);
+          const linkPath = NodePath.join(result.stageRoot, "host-link");
+          await NodeFS.symlink(
+            NodePath.relative(NodePath.dirname(linkPath), result.paths.hostBundle),
+            linkPath,
+            "file",
+          );
+          return result;
+        },
+      },
+    });
+    expect(staged.payload.symlinkCount).toBe(1);
+    expect(staged.payload.fileCount).toBe(6);
+    expect(staged.payload.regularFileBytes).toBe(
+      (await NodeFS.stat(fixture.host)).size +
+        (await NodeFS.stat(fixture.node)).size +
+        (await NodeFS.stat(fixture.monitor)).size +
+        (await NodeFS.stat(fixture.nodeLicense)).size +
+        (await NodeFS.stat(NodePath.join(fixture.server, "apps/server/dist/bin.mjs"))).size,
+    );
+
+    await NodeFS.rm(NodePath.join(fixture.stage, "host-link"));
+    await NodeFS.symlink(outside, NodePath.join(fixture.stage, "escape"), "file");
+    await expect(
+      inspectTauriArtifactPayload(fixture.stage),
+    ).rejects.toMatchObject<TauriArtifactError>({ code: "unsafe-payload" });
   });
 
   it("fails closed for partial Clerk configuration before staging", async () => {

@@ -23,6 +23,30 @@ import {
 export type TauriArtifactPlatform = "mac" | "linux" | "win";
 export type TauriArtifactArch = "arm64" | "x64";
 
+/**
+ * V4-final keeps the loose Tauri resource tree small enough for predictable
+ * install time and packaging memory use. These production limits are frozen;
+ * the orchestration dependency seam below exists only for focused tests.
+ */
+export const TAURI_ARTIFACT_PAYLOAD_LIMITS = Object.freeze({
+  maxFileCount: 2_500,
+  maxRegularFileBytes: 400 * 1024 * 1024,
+});
+
+export interface TauriArtifactPayloadLimits {
+  readonly maxFileCount: number;
+  readonly maxRegularFileBytes: number;
+}
+
+export interface TauriArtifactPayloadStats {
+  /** Regular files plus symlinks. Directories are reported separately. */
+  readonly fileCount: number;
+  readonly regularFileCount: number;
+  readonly symlinkCount: number;
+  readonly directoryCount: number;
+  readonly regularFileBytes: number;
+}
+
 export const TAURI_ARTIFACT_VERSION_ENVIRONMENT_KEYS = [
   "NANONI_PRODUCT_VERSION",
   "NANONI_COMPAT_SERVER_VERSION",
@@ -93,6 +117,8 @@ export interface TauriArtifactDependencies {
   readonly prepare?: TauriArtifactPrepareHook;
   readonly build?: TauriArtifactHook;
   readonly smoke?: TauriArtifactHook;
+  /** Test-only limit override; the CLI never exposes this seam. */
+  readonly payloadBudgetLimits?: Partial<TauriArtifactPayloadLimits>;
 }
 
 export interface BuildTauriArtifactOptions extends TauriStageSources {
@@ -121,6 +147,7 @@ export interface BuildTauriArtifactResult {
   readonly nodeSidecarPath: string;
   readonly configOverlayPath: string;
   readonly configOverlay: TauriConfigOverlay;
+  readonly payload: TauriArtifactPayloadStats;
   readonly hooks: {
     readonly build: boolean;
     readonly smoke: ReadonlyArray<"normal" | "forced-kill">;
@@ -128,7 +155,12 @@ export interface BuildTauriArtifactResult {
 }
 
 export class TauriArtifactError extends Error {
-  readonly code: "missing-input" | "invalid-input" | "clerk-config-present";
+  readonly code:
+    | "missing-input"
+    | "invalid-input"
+    | "clerk-config-present"
+    | "payload-budget-exceeded"
+    | "unsafe-payload";
 
   constructor(code: TauriArtifactError["code"], message: string, options?: ErrorOptions) {
     super(message, options);
@@ -282,6 +314,161 @@ const writeOverlay = async (
   await fs.writeFile(path, `${JSON.stringify(overlay, null, 2)}\n`, "utf8");
 };
 
+const isInside = (root: string, candidate: string): boolean => {
+  const relative = NodePath.relative(root, candidate);
+  return (
+    relative === "" ||
+    (relative !== ".." &&
+      !relative.startsWith(`..${NodePath.sep}`) &&
+      !NodePath.isAbsolute(relative))
+  );
+};
+
+const resolvePayloadLimits = (
+  overrides: Partial<TauriArtifactPayloadLimits> | undefined,
+): TauriArtifactPayloadLimits => {
+  const limits = {
+    ...TAURI_ARTIFACT_PAYLOAD_LIMITS,
+    ...overrides,
+  };
+  if (
+    !Number.isSafeInteger(limits.maxFileCount) ||
+    limits.maxFileCount < 0 ||
+    !Number.isSafeInteger(limits.maxRegularFileBytes) ||
+    limits.maxRegularFileBytes < 0
+  ) {
+    throw new TauriArtifactError(
+      "invalid-input",
+      "Tauri payload budget limits must be non-negative safe integers.",
+    );
+  }
+  return limits;
+};
+
+/**
+ * Inspect a staged resource tree without ever following a symlink. The
+ * acceptance count intentionally includes regular files and symlinks only;
+ * directories are reported for diagnostics but do not consume the file budget.
+ */
+export const inspectTauriArtifactPayload = async (
+  stageRoot: string,
+  limits: TauriArtifactPayloadLimits = TAURI_ARTIFACT_PAYLOAD_LIMITS,
+): Promise<TauriArtifactPayloadStats> => {
+  const root = NodePath.resolve(stageRoot);
+  const resolvedLimits = resolvePayloadLimits(limits);
+  let fileCount = 0;
+  let regularFileCount = 0;
+  let symlinkCount = 0;
+  let directoryCount = 0;
+  let regularFileBytes = 0;
+
+  const failBudget = (message: string): never => {
+    throw new TauriArtifactError("payload-budget-exceeded", message);
+  };
+
+  const visit = async (path: string): Promise<void> => {
+    let info: Awaited<ReturnType<typeof NodeFS.lstat>>;
+    try {
+      info = await NodeFS.lstat(path);
+    } catch (cause) {
+      throw new TauriArtifactError(
+        "unsafe-payload",
+        `Unable to inspect staged payload entry: ${path}.`,
+        { cause },
+      );
+    }
+
+    if (info.isSymbolicLink()) {
+      let linkTarget: string;
+      try {
+        linkTarget = await NodeFS.readlink(path);
+      } catch (cause) {
+        throw new TauriArtifactError(
+          "unsafe-payload",
+          `Unable to read staged payload symlink: ${path}.`,
+          { cause },
+        );
+      }
+      const resolvedTarget = NodePath.resolve(NodePath.dirname(path), linkTarget);
+      if (!isInside(root, resolvedTarget)) {
+        throw new TauriArtifactError(
+          "unsafe-payload",
+          `Refusing staged payload symlink outside the stage: ${path} -> ${linkTarget}.`,
+        );
+      }
+      fileCount += 1;
+      symlinkCount += 1;
+      if (fileCount > resolvedLimits.maxFileCount) {
+        failBudget(
+          `Staged Tauri payload contains ${String(fileCount)} files/symlinks; maximum is ${String(resolvedLimits.maxFileCount)}.`,
+        );
+      }
+      return;
+    }
+
+    if (info.isDirectory()) {
+      directoryCount += 1;
+      let entries: ReadonlyArray<{ readonly name: string }>;
+      try {
+        entries = (await NodeFS.readdir(path, { withFileTypes: true })).toSorted((a, b) =>
+          a.name.localeCompare(b.name),
+        );
+      } catch (cause) {
+        throw new TauriArtifactError(
+          "unsafe-payload",
+          `Unable to inspect staged payload directory: ${path}.`,
+          { cause },
+        );
+      }
+      for (const entry of entries) await visit(NodePath.join(path, entry.name));
+      return;
+    }
+
+    if (info.isFile()) {
+      fileCount += 1;
+      regularFileCount += 1;
+      regularFileBytes += info.size;
+      if (fileCount > resolvedLimits.maxFileCount) {
+        failBudget(
+          `Staged Tauri payload contains ${String(fileCount)} files/symlinks; maximum is ${String(resolvedLimits.maxFileCount)}.`,
+        );
+      }
+      if (regularFileBytes > resolvedLimits.maxRegularFileBytes) {
+        failBudget(
+          `Staged Tauri payload contains ${String(regularFileBytes)} regular-file bytes; maximum is ${String(resolvedLimits.maxRegularFileBytes)}.`,
+        );
+      }
+      return;
+    }
+
+    throw new TauriArtifactError(
+      "unsafe-payload",
+      `Unsupported filesystem entry in staged Tauri payload: ${path}.`,
+    );
+  };
+
+  let rootInfo: Awaited<ReturnType<typeof NodeFS.lstat>>;
+  try {
+    rootInfo = await NodeFS.lstat(root);
+  } catch (cause) {
+    throw new TauriArtifactError(
+      "unsafe-payload",
+      `Unable to inspect staged payload root: ${root}.`,
+      {
+        cause,
+      },
+    );
+  }
+  if (!rootInfo.isDirectory()) {
+    throw new TauriArtifactError(
+      "unsafe-payload",
+      `Staged payload root is not a directory: ${root}.`,
+    );
+  }
+  await visit(root);
+  return { fileCount, regularFileCount, symlinkCount, directoryCount, regularFileBytes };
+};
+
 export const buildTauriArtifact = async (
   options: BuildTauriArtifactOptions,
 ): Promise<BuildTauriArtifactResult> => {
@@ -353,6 +540,11 @@ export const buildTauriArtifact = async (
     );
   }
 
+  const payload = await inspectTauriArtifactPayload(
+    stageRoot,
+    resolvePayloadLimits(dependencies.payloadBudgetLimits),
+  );
+
   // Scan the actual staged output as well as inputs. A key accidentally emitted
   // by a host/server build must fail before tauri consumes the stage.
   await clerkCheck([stageRoot], {});
@@ -420,6 +612,7 @@ export const buildTauriArtifact = async (
     nodeSidecarPath: stagedNodeSidecarPath,
     configOverlayPath,
     configOverlay,
+    payload,
     hooks: { build: dependencies.build !== undefined, smoke: smokeVariants },
   };
 };
