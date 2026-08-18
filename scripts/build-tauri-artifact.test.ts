@@ -16,6 +16,7 @@ import {
   resolveTauriBuildArguments,
   resolveTauriCliCwd,
   resolvePinnedNodeEnvironment,
+  resolveTauriSmokeBundlePath,
 } from "./build-tauri-artifact.ts";
 import { stageTauriResources } from "./lib/tauri-stage.ts";
 
@@ -396,7 +397,7 @@ describe("Tauri artifact orchestration", () => {
     );
   });
 
-  it("rejects CLI packaging without explicit version, license, or smoke binary", () => {
+  it("rejects CLI packaging without an explicit version or license", () => {
     const base = [
       "--server",
       "server",
@@ -408,15 +409,24 @@ describe("Tauri artifact orchestration", () => {
     expect(() => parseTauriArtifactArguments([...base, "--node-license", "LICENSE"])).toThrow(
       /--product-version is required/,
     );
+    const parsed = parseTauriArtifactArguments(
+      [...base, "--node-license", "LICENSE", "--product-version", "1.2.3"],
+      { platform: "linux" },
+    );
+    expect(parsed.platform).toBe("linux");
+    expect(parsed.binaryPath).toBeUndefined();
+
     expect(() =>
-      parseTauriArtifactArguments([
-        ...base,
-        "--node-license",
-        "LICENSE",
-        "--product-version",
-        "1.2.3",
-      ]),
-    ).toThrow(/--binary is required/);
+      parseTauriArtifactArguments(
+        [...base, "--node-license", "LICENSE", "--product-version", "1.2.3"],
+        { platform: "win" },
+      ),
+    ).toThrow(/Windows packaged smoke remains pending/);
+    const windows = parseTauriArtifactArguments(
+      [...base, "--node-license", "LICENSE", "--product-version", "1.2.3", "--skip-smoke"],
+      { platform: "win" },
+    );
+    expect(windows.skipSmoke).toBe(true);
   });
 
   it("creates an updater-disabled overlay without touching the base config", () => {
@@ -434,6 +444,79 @@ describe("Tauri artifact orchestration", () => {
 
   it("runs the Tauri CLI from the desktop project directory", () => {
     expect(resolveTauriCliCwd("C:/repo")).toBe(NodePath.join("C:/repo", "apps/desktop"));
+  });
+
+  it("resolves exactly one Linux AppImage and rejects ambiguous or non-file output", async () => {
+    const fixture = await makeFixture();
+    const appImageDirectory = NodePath.join(
+      fixture.root,
+      "apps/desktop/src-tauri/target/debug/bundle/appimage",
+    );
+    await NodeFS.mkdir(appImageDirectory, { recursive: true });
+    const appImage = NodePath.join(appImageDirectory, "T3-Code.AppImage");
+    await NodeFS.writeFile(appImage, "appimage\n");
+
+    await expect(
+      resolveTauriSmokeBundlePath({ rootDir: fixture.root, platform: "linux", profile: "debug" }),
+    ).resolves.toBe(appImage);
+
+    await NodeFS.writeFile(NodePath.join(appImageDirectory, "other.AppImage"), "appimage\n");
+    await expect(
+      resolveTauriSmokeBundlePath({ rootDir: fixture.root, platform: "linux", profile: "debug" }),
+    ).rejects.toThrow(/exactly one AppImage/);
+
+    await NodeFS.rm(NodePath.join(appImageDirectory, "other.AppImage"));
+    await NodeFS.rm(appImage);
+    await NodeFS.mkdir(appImage, { recursive: true });
+    await expect(
+      resolveTauriSmokeBundlePath({ rootDir: fixture.root, platform: "linux", profile: "debug" }),
+    ).rejects.toThrow(/not a regular file/);
+  });
+
+  it("resolves the sole macOS app executable and rejects ambiguous app output", async () => {
+    const fixture = await makeFixture();
+    const macBundleDirectory = NodePath.join(
+      fixture.root,
+      "apps/desktop/src-tauri/target/release/bundle/macos",
+    );
+    const appBundle = NodePath.join(macBundleDirectory, "T3 Code.app");
+    const executableDirectory = NodePath.join(appBundle, "Contents/MacOS");
+    await NodeFS.mkdir(executableDirectory, { recursive: true });
+    const executable = NodePath.join(executableDirectory, "T3 Code");
+    await NodeFS.writeFile(executable, "mach-o\n");
+
+    await expect(
+      resolveTauriSmokeBundlePath({ rootDir: fixture.root, platform: "mac", profile: "release" }),
+    ).resolves.toBe(executable);
+
+    await NodeFS.mkdir(NodePath.join(macBundleDirectory, "Other.app", "Contents/MacOS"), {
+      recursive: true,
+    });
+    await expect(
+      resolveTauriSmokeBundlePath({ rootDir: fixture.root, platform: "mac", profile: "release" }),
+    ).rejects.toThrow(/exactly one macOS \.app bundle/);
+  });
+
+  it("fails closed when a macOS app has no single regular executable", async () => {
+    const fixture = await makeFixture();
+    const executableDirectory = NodePath.join(
+      fixture.root,
+      "apps/desktop/src-tauri/target/debug/bundle/macos/T3 Code.app/Contents/MacOS",
+    );
+    await NodeFS.mkdir(NodePath.join(executableDirectory, "not-an-executable"), {
+      recursive: true,
+    });
+
+    await expect(
+      resolveTauriSmokeBundlePath({ rootDir: fixture.root, platform: "mac", profile: "debug" }),
+    ).rejects.toThrow(/exactly one macOS app executable/);
+  });
+
+  it("keeps Windows packaged smoke explicitly unresolved", async () => {
+    const fixture = await makeFixture();
+    await expect(
+      resolveTauriSmokeBundlePath({ rootDir: fixture.root, platform: "win", profile: "debug" }),
+    ).rejects.toThrow(/Windows packaged smoke remains pending/);
   });
 
   it("puts the pinned Node directory first even when the executable is already named node", async () => {

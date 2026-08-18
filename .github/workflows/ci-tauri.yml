@@ -239,30 +239,50 @@ jobs:
           ${{ matrix.debug_arg }}
           --skip-smoke
 
+      - name: Resolve Linux packaged smoke bundle
+        if: matrix.profile == 'debug' && runner.os == 'Linux'
+        id: resolve_linux_debug_bundle
+        shell: bash
+        run: |
+          bundle="$(node --input-type=module -e "const { resolveTauriSmokeBundlePath } = await import('./scripts/build-tauri-artifact.ts'); process.stdout.write(await resolveTauriSmokeBundlePath({ rootDir: process.cwd(), platform: 'linux', profile: 'debug' }));")"
+          printf 'bundle=%s\n' "$bundle" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve macOS packaged smoke bundle
+        if: matrix.profile == 'debug' && runner.os == 'macOS'
+        id: resolve_macos_debug_bundle
+        shell: bash
+        run: |
+          bundle="$(node --input-type=module -e "const { resolveTauriSmokeBundlePath } = await import('./scripts/build-tauri-artifact.ts'); process.stdout.write(await resolveTauriSmokeBundlePath({ rootDir: process.cwd(), platform: 'mac', profile: 'debug' }));")"
+          printf 'bundle=%s\n' "$bundle" >> "$GITHUB_OUTPUT"
+
       - name: Run normal packaged smoke
         if: matrix.profile == 'debug' && runner.os == 'Linux'
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
         run: >-
           xvfb-run -a node apps/desktop/scripts/tauri/smoke-test.mjs
-          --bundle apps/desktop/src-tauri/target/debug/${{ matrix.binary }}
+          --bundle "${{ steps.resolve_linux_debug_bundle.outputs.bundle }}"
 
       - name: Run normal packaged smoke (macOS)
         if: matrix.profile == 'debug' && runner.os == 'macOS'
         run: >-
           node apps/desktop/scripts/tauri/smoke-test.mjs
-          --bundle apps/desktop/src-tauri/target/debug/${{ matrix.binary }}
+          --bundle "${{ steps.resolve_macos_debug_bundle.outputs.bundle }}"
 
       - name: Run forced-host packaged smoke
         if: matrix.profile == 'debug' && runner.os == 'Linux'
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
         run: >-
           xvfb-run -a node apps/desktop/scripts/tauri/smoke-test.mjs
-          --bundle apps/desktop/src-tauri/target/debug/${{ matrix.binary }}
+          --bundle "${{ steps.resolve_linux_debug_bundle.outputs.bundle }}"
           --kill-host
 
       - name: Run forced-host packaged smoke (macOS)
         if: matrix.profile == 'debug' && runner.os == 'macOS'
         run: >-
           node apps/desktop/scripts/tauri/smoke-test.mjs
-          --bundle apps/desktop/src-tauri/target/debug/${{ matrix.binary }}
+          --bundle "${{ steps.resolve_macos_debug_bundle.outputs.bundle }}"
           --kill-host
 
       - name: Document Windows fd transport boundary

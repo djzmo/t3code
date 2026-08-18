@@ -753,8 +753,91 @@ export const resolvePinnedNodeEnvironment = async (
   };
 };
 
+export type TauriArtifactProfile = "debug" | "release";
+
+export interface ResolveTauriSmokeBundleOptions {
+  readonly rootDir: string;
+  readonly platform: TauriArtifactPlatform;
+  readonly profile: TauriArtifactProfile;
+}
+
+/**
+ * Resolve the staged bundle that Tauri produced for a packaged smoke.
+ *
+ * The target binary is not a runnable packaged application on POSIX: it has
+ * neither the resource tree nor the platform loader setup. Keep this lookup
+ * deliberately strict so a smoke can never silently fall back to that bare
+ * target or pick an arbitrary artifact from a dirty target directory.
+ */
+export const resolveTauriSmokeBundlePath = async ({
+  rootDir,
+  platform,
+  profile,
+}: ResolveTauriSmokeBundleOptions): Promise<string> => {
+  if (platform === "win") {
+    throw new Error("Windows packaged smoke remains pending the bootstrap transport decision.");
+  }
+
+  const bundleRoot = NodePath.resolve(rootDir, "apps/desktop/src-tauri/target", profile, "bundle");
+  const bundleDirectory = NodePath.join(bundleRoot, platform === "linux" ? "appimage" : "macos");
+  const entries = await NodeFS.readdir(bundleDirectory, { withFileTypes: true }).catch((cause) => {
+    throw new Error(`Tauri ${platform} smoke bundle directory is unavailable: ${bundleDirectory}`, {
+      cause,
+    });
+  });
+
+  if (platform === "linux") {
+    const appImages = entries.filter((entry) => entry.name.toLowerCase().endsWith(".appimage"));
+    if (appImages.length !== 1) {
+      throw new Error(
+        `Expected exactly one AppImage in ${bundleDirectory}; found ${appImages.length}.`,
+      );
+    }
+    const appImage = appImages[0];
+    if (appImage === undefined || !appImage.isFile()) {
+      throw new Error(
+        `Tauri AppImage is not a regular file: ${NodePath.join(bundleDirectory, appImage?.name ?? "?")}`,
+      );
+    }
+    return NodePath.join(bundleDirectory, appImage.name);
+  }
+
+  const appBundles = entries.filter((entry) => entry.name.toLowerCase().endsWith(".app"));
+  if (appBundles.length !== 1) {
+    throw new Error(
+      `Expected exactly one macOS .app bundle in ${bundleDirectory}; found ${appBundles.length}.`,
+    );
+  }
+  const appBundle = appBundles[0];
+  if (appBundle === undefined || !appBundle.isDirectory()) {
+    throw new Error(
+      `macOS app bundle is not a directory: ${NodePath.join(bundleDirectory, appBundle?.name ?? "?")}`,
+    );
+  }
+
+  const executableDirectory = NodePath.join(bundleDirectory, appBundle.name, "Contents", "MacOS");
+  const executableEntries = await NodeFS.readdir(executableDirectory, {
+    withFileTypes: true,
+  }).catch((cause) => {
+    throw new Error(`macOS app executable directory is unavailable: ${executableDirectory}`, {
+      cause,
+    });
+  });
+  const executables = executableEntries.filter((entry) => entry.isFile());
+  if (executables.length !== 1) {
+    throw new Error(
+      `Expected exactly one macOS app executable in ${executableDirectory}; found ${executables.length}.`,
+    );
+  }
+  const executable = executables[0];
+  if (executable === undefined) {
+    throw new Error(`macOS app executable is missing: ${executableDirectory}`);
+  }
+  return NodePath.join(executableDirectory, executable.name);
+};
+
 const createCliHooks = (options: TauriArtifactCliOptions) => {
-  const { rootDir, binaryPath, platform, arch } = options;
+  const { rootDir, platform, arch } = options;
   const vpCli = NodePath.join(rootDir, "node_modules/vite-plus/dist/bin.js");
   const tauriCli = NodePath.join(rootDir, "apps/desktop/node_modules/@tauri-apps/cli/main.js");
   const prepare: TauriArtifactPrepareHook = async (context) => {
@@ -800,20 +883,28 @@ const createCliHooks = (options: TauriArtifactCliOptions) => {
     );
   };
   const smoke: TauriArtifactHook = async (context) => {
-    if (!binaryPath) {
-      throw new Error("A Tauri binary is required for smoke tests; pass --binary.");
+    if (platform === "win") {
+      throw new Error("Windows packaged smoke remains pending the bootstrap transport decision.");
     }
+    const bundlePath = await resolveTauriSmokeBundlePath({
+      rootDir,
+      platform,
+      profile: options.debug ? "debug" : "release",
+    });
     await spawnCommand(
       process.execPath,
       [
         NodePath.join(rootDir, "apps/desktop/scripts/tauri/smoke-test.mjs"),
         "--bundle",
-        binaryPath,
+        bundlePath,
         ...(context.smokeVariant === "forced-kill" ? ["--kill-host"] : []),
       ],
       {
         cwd: rootDir,
-        environment: context.environment,
+        environment: {
+          ...context.environment,
+          ...(platform === "linux" ? { APPIMAGE_EXTRACT_AND_RUN: "1" } : {}),
+        },
       },
     );
   };
@@ -970,8 +1061,8 @@ export const parseTauriArtifactArguments = (
     ["--product-version", values.productVersion],
   ] as const;
   for (const [flag, value] of required) if (!value) throw new Error(`${flag} is required.`);
-  if (!values.skipSmoke && !values.binaryPath) {
-    throw new Error("--binary is required unless --skip-smoke is set.");
+  if (finalPlatform === "win" && !values.skipSmoke) {
+    throw new Error("Windows packaged smoke remains pending the bootstrap transport decision.");
   }
   return values as TauriArtifactCliOptions;
 };
