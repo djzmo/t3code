@@ -6,5 +6,8 @@
 //! process supervision, and Tauri integration are intentionally added by later
 //! phase slices.
 
+pub mod bridge;
 pub mod lifecycle;
+pub mod opener;
 pub mod rpc;
+pub mod window;
