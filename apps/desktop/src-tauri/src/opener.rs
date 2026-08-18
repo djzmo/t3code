@@ -138,6 +138,28 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    #[derive(serde::Deserialize)]
+    struct SafeExternalSchemesFixture {
+        schemes: Vec<String>,
+    }
+
+    #[test]
+    fn native_allow_list_matches_the_cross_language_fixture() {
+        let fixture = serde_json::from_str::<SafeExternalSchemesFixture>(include_str!(
+            "../../src/tauri/bridge/safe-external-schemes.json"
+        ));
+        assert!(fixture.is_ok());
+        assert_eq!(
+            fixture.ok().map(|fixture| fixture.schemes),
+            Some(
+                SAFE_EXTERNAL_SCHEMES
+                    .iter()
+                    .map(|scheme| (*scheme).to_owned())
+                    .collect()
+            )
+        );
+    }
+
     #[test]
     fn normalizes_http_and_https_like_url_href() {
         let http = validate_external_url("HTTP://EXAMPLE.COM/path");

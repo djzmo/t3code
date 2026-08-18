@@ -7,6 +7,7 @@ import * as Option from "effect/Option";
 import { REMOTE_CAPABLE_EDITOR_IDS, remoteSchemeForEditor } from "@t3tools/contracts";
 
 import * as ElectronShell from "../../electron/ElectronShell.ts";
+import safeExternalSchemes from "../bridge/safe-external-schemes.json" with { type: "json" };
 import * as TauriShell from "./TauriShell.ts";
 
 describe("TauriShell", () => {
@@ -42,6 +43,15 @@ describe("TauriShell", () => {
   });
 
   it("keeps the external URL allow-list in parity with ElectronShell", () => {
+    assert.deepEqual(safeExternalSchemes.schemes, [
+      "http",
+      "https",
+      ...REMOTE_CAPABLE_EDITOR_IDS.map((editorId) => {
+        const scheme = remoteSchemeForEditor(editorId);
+        assert.isString(scheme);
+        return scheme;
+      }),
+    ]);
     const urls = [
       "http://example.com/path?q=1",
       "https://example.com/path?q=1",

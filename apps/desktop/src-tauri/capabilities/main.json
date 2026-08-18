@@ -4,7 +4,6 @@
   "description": "Permissions for the main Agent Nanoni webview.",
   "webviews": ["main"],
   "permissions": [
-    "core:default",
     "core:event:default",
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize",

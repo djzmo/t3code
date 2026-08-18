@@ -95,9 +95,18 @@ fn host_invoke(
 
 #[tauri::command]
 fn desktop_events(
+    webview: WebviewWindow,
     state: tauri::State<'_, BridgeRuntime>,
     channel: Channel<DesktopEvent>,
 ) -> Result<(), String> {
+    let application_url = state.application_url()?;
+    let current_url = webview.url().map_err(|error| error.to_string())?;
+    agent_nanoni_desktop::bridge::authorize_host_invoke(HostInvokeContext {
+        webview_label: webview.label(),
+        application_url: &application_url,
+        current_url: current_url.as_str(),
+    })
+    .map_err(|error| error.to_string())?;
     state.set_desktop_events(channel)
 }
 

@@ -5,6 +5,8 @@
 //! fed arbitrary byte chunks and emits complete frames, recoverable resync
 //! errors, or a terminal close event for a limit violation.
 
+use std::io::{self, Read, Write};
+
 use serde::Serialize;
 use thiserror::Error;
 
@@ -62,6 +64,162 @@ pub enum DecoderEvent {
     Resynchronized(TransportError),
     /// A protocol limit was exceeded and the decoder must be closed.
     Closed(TransportError),
+}
+
+/// Events produced by [`StdioFramePump::read_once`].
+///
+/// `Frame` and `Resynchronized` preserve the decoder's recoverable events.
+/// `Closed` is terminal for a protocol limit violation; `Eof` is terminal for
+/// a clean input-side EOF.  A trailing partial frame is reported as a
+/// `Resynchronized` event immediately before `Eof`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FramePumpEvent {
+    /// A complete, UTF-8 and syntactically valid JSON frame.
+    Frame(DecodedFrame),
+    /// Input was discarded and decoding can continue at the next separator.
+    Resynchronized(TransportError),
+    /// The decoder closed the transport after a protocol limit violation.
+    Closed(TransportError),
+    /// The injected reader reached EOF and no more frames can arrive.
+    Eof,
+}
+
+/// Errors returned by the blocking frame pump.
+#[derive(Debug, Error)]
+pub enum FramePumpError {
+    /// The injected reader or writer failed.
+    #[error("stdio transport I/O failed: {0}")]
+    Io(#[from] io::Error),
+    /// JSON could not be encoded as a canonical frame.
+    #[error("frame encoding failed: {0}")]
+    Transport(#[from] TransportError),
+    /// The pump has observed EOF or a terminal protocol/I/O failure.
+    #[error("stdio transport is closed")]
+    Closed,
+}
+
+/// A blocking, runtime-agnostic framed stdio pump.
+///
+/// The reader and writer are injected so the exact same pump can be exercised
+/// with chunked/short test doubles or connected to a child process's stdio.
+/// The writer is intentionally private: callers can only emit canonical
+/// length-prefixed JSON frames through [`Self::send_json`] or [`Self::send`],
+/// so unframed stdout bytes cannot take over the RPC stream.
+pub struct StdioFramePump<R, W> {
+    reader: R,
+    writer: W,
+    decoder: FrameDecoder,
+    read_buffer: [u8; STDIO_READ_BUFFER_BYTES],
+    closed: bool,
+}
+
+/// Read chunk size used by [`StdioFramePump`].
+pub const STDIO_READ_BUFFER_BYTES: usize = 16 * 1024;
+
+impl<R, W> StdioFramePump<R, W>
+where
+    R: Read,
+    W: Write,
+{
+    /// Creates a pump over an injected blocking reader and writer.
+    #[must_use]
+    pub fn new(reader: R, writer: W) -> Self {
+        Self {
+            reader,
+            writer,
+            decoder: FrameDecoder::new(),
+            read_buffer: [0; STDIO_READ_BUFFER_BYTES],
+            closed: false,
+        }
+    }
+
+    /// Returns whether input EOF or a terminal transport error has been seen.
+    #[must_use]
+    pub const fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    /// Reads one blocking chunk and decodes every complete event it contains.
+    ///
+    /// `Interrupted` reads are retried because they do not indicate a
+    /// transport failure.  A zero-byte read emits `Eof` (and any trailing
+    /// partial-frame resynchronization event) exactly once.
+    pub fn read_once(&mut self) -> Result<Vec<FramePumpEvent>, FramePumpError> {
+        if self.closed {
+            return Ok(Vec::new());
+        }
+
+        let read = loop {
+            match self.reader.read(&mut self.read_buffer) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                result => break result,
+            }
+        }?;
+
+        if read == 0 {
+            let events = self
+                .decoder
+                .finish()
+                .into_iter()
+                .map(Self::map_decoder_event)
+                .chain(std::iter::once(FramePumpEvent::Eof))
+                .collect();
+            self.closed = true;
+            return Ok(events);
+        }
+
+        let events = self
+            .decoder
+            .feed(&self.read_buffer[..read])
+            .into_iter()
+            .map(Self::map_decoder_event)
+            .collect::<Vec<_>>();
+        if events
+            .iter()
+            .any(|event| matches!(event, FramePumpEvent::Closed(_)))
+        {
+            self.closed = true;
+        }
+        Ok(events)
+    }
+
+    /// Sends one JSON text value as an exact canonical frame.
+    ///
+    /// `write_all` handles short writes and `flush` makes the frame visible to
+    /// a child process without relying on a runtime-specific buffering policy.
+    pub fn send_json(&mut self, json: &str) -> Result<(), FramePumpError> {
+        let frame = encode_json(json)?;
+        self.send_encoded(&frame)
+    }
+
+    /// Serializes and sends one value as an exact canonical frame.
+    pub fn send<T: Serialize>(&mut self, value: &T) -> Result<(), FramePumpError> {
+        let frame = encode(value)?;
+        self.send_encoded(&frame)
+    }
+
+    fn send_encoded(&mut self, frame: &[u8]) -> Result<(), FramePumpError> {
+        if self.closed {
+            return Err(FramePumpError::Closed);
+        }
+        if let Err(error) = self
+            .writer
+            .write_all(frame)
+            .and_then(|()| self.writer.flush())
+        {
+            self.closed = true;
+            return Err(FramePumpError::Io(error));
+        }
+        Ok(())
+    }
+
+    fn map_decoder_event(event: DecoderEvent) -> FramePumpEvent {
+        match event {
+            DecoderEvent::Frame(frame) => FramePumpEvent::Frame(frame),
+            DecoderEvent::Resynchronized(error) => FramePumpEvent::Resynchronized(error),
+            DecoderEvent::Closed(error) => FramePumpEvent::Closed(error),
+        }
+    }
 }
 
 /// A bounded streaming decoder for the record-separated frame format.
@@ -385,8 +543,70 @@ pub fn validate_json_bytes(bytes: &[u8]) -> Result<(), TransportError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::io::{self, Read, Write};
+
     use super::*;
     use crate::rpc::protocol::fixture_document;
+
+    struct ChunkedReader {
+        chunks: VecDeque<Vec<u8>>,
+    }
+
+    impl ChunkedReader {
+        fn new(chunks: impl IntoIterator<Item = Vec<u8>>) -> Self {
+            Self {
+                chunks: chunks.into_iter().collect(),
+            }
+        }
+    }
+
+    impl Read for ChunkedReader {
+        fn read(&mut self, destination: &mut [u8]) -> io::Result<usize> {
+            let Some(mut chunk) = self.chunks.pop_front() else {
+                return Ok(0);
+            };
+            if chunk.len() > destination.len() {
+                let remainder = chunk.split_off(destination.len());
+                self.chunks.push_front(remainder);
+            }
+            let count = chunk.len();
+            destination[..count].copy_from_slice(&chunk);
+            Ok(count)
+        }
+    }
+
+    struct ShortWriter {
+        bytes: Vec<u8>,
+        max_write: usize,
+        flushes: usize,
+    }
+
+    impl ShortWriter {
+        fn new(max_write: usize) -> Self {
+            Self {
+                bytes: Vec::new(),
+                max_write,
+                flushes: 0,
+            }
+        }
+    }
+
+    impl Write for ShortWriter {
+        fn write(&mut self, source: &[u8]) -> io::Result<usize> {
+            let count = source.len().min(self.max_write);
+            if count == 0 {
+                return Ok(0);
+            }
+            self.bytes.extend_from_slice(&source[..count]);
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes = self.flushes.saturating_add(1);
+            Ok(())
+        }
+    }
 
     fn fixture_bytes(frame: &crate::rpc::protocol::FrameFixture) -> Vec<u8> {
         if let Some(bytes) = &frame.bytes {
@@ -539,5 +759,114 @@ mod tests {
             + &"]".repeat(usize::try_from(MAX_NESTING_DEPTH).unwrap_or(64) + 1);
         let frame = encode_json(&nested);
         assert!(matches!(frame, Err(TransportError::TooDeep { .. })));
+    }
+
+    #[test]
+    fn stdio_pump_reassembles_chunked_frames_and_reports_eof() {
+        let first = encode_json(r#"{"jsonrpc":"2.0","id":1}"#).expect("first frame");
+        let second = encode_json(r#"{"jsonrpc":"2.0","id":2}"#).expect("second frame");
+        let split = first.len() / 2;
+        let mut pump = StdioFramePump::new(
+            ChunkedReader::new([
+                first[..split].to_vec(),
+                first[split..].to_vec(),
+                b"log-before-frame".to_vec(),
+                second,
+            ]),
+            ShortWriter::new(8),
+        );
+
+        let mut events = Vec::new();
+        while !pump.is_closed() {
+            events.extend(pump.read_once().expect("chunk read succeeds"));
+        }
+
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, FramePumpEvent::Frame(_)))
+                .count(),
+            2
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            FramePumpEvent::Resynchronized(TransportError::UnframedBytes)
+        )));
+        assert!(matches!(events.last(), Some(FramePumpEvent::Eof)));
+    }
+
+    #[test]
+    fn stdio_pump_writes_exact_frames_through_short_writes() {
+        let mut pump =
+            StdioFramePump::new(ChunkedReader::new(std::iter::empty()), ShortWriter::new(2));
+        pump.send_json(r#"{"jsonrpc":"2.0","method":"ready"}"#)
+            .expect("frame writes");
+        let expected = encode_json(r#"{"jsonrpc":"2.0","method":"ready"}"#).expect("frame encodes");
+        assert_eq!(pump.writer.bytes, expected);
+        assert_eq!(pump.writer.flushes, 1);
+    }
+
+    #[test]
+    fn stdio_pump_rejects_unframed_or_malformed_output() {
+        let mut pump =
+            StdioFramePump::new(ChunkedReader::new(std::iter::empty()), ShortWriter::new(8));
+        let result = pump.send_json("not-json");
+        assert!(matches!(
+            result,
+            Err(FramePumpError::Transport(
+                TransportError::MalformedJson { .. }
+            ))
+        ));
+        assert!(pump.writer.bytes.is_empty());
+    }
+
+    #[test]
+    fn stdio_pump_resynchronizes_malformed_input_before_next_frame() {
+        let valid = encode_json(r#"{"jsonrpc":"2.0","id":9}"#).expect("valid frame");
+        let mut input = b"\x1e4:{x}\n".to_vec();
+        input.extend_from_slice(&valid);
+        let mut pump = StdioFramePump::new(ChunkedReader::new([input]), ShortWriter::new(8));
+        let events = pump.read_once().expect("input read");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            FramePumpEvent::Resynchronized(TransportError::LengthMismatch { .. })
+                | FramePumpEvent::Resynchronized(TransportError::MalformedJson { .. })
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            FramePumpEvent::Frame(DecodedFrame { json }) if json.contains("\"id\":9")
+        )));
+    }
+
+    #[test]
+    fn stdio_pump_reports_partial_frame_then_eof_and_stops() {
+        let mut pump = StdioFramePump::new(
+            ChunkedReader::new([b"\x1e12:{\"x\":1}".to_vec()]),
+            ShortWriter::new(8),
+        );
+        assert!(pump.read_once().expect("partial read").is_empty());
+        let events = pump.read_once().expect("eof read");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            FramePumpEvent::Resynchronized(TransportError::LengthMismatch { .. })
+        )));
+        assert!(matches!(events.last(), Some(FramePumpEvent::Eof)));
+        assert!(pump.read_once().expect("closed read").is_empty());
+    }
+
+    #[test]
+    fn stdio_pump_surfaces_terminal_decoder_close() {
+        let oversized = format!("\x1e{}:x\n", MAX_FRAME_BYTES + 1).into_bytes();
+        let mut pump = StdioFramePump::new(ChunkedReader::new([oversized]), ShortWriter::new(8));
+        let events = pump.read_once().expect("oversized read");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            FramePumpEvent::Closed(TransportError::Oversized { .. })
+        )));
+        assert!(pump.is_closed());
+        assert!(matches!(
+            pump.send_json(r#"{"ok":true}"#),
+            Err(FramePumpError::Closed)
+        ));
     }
 }

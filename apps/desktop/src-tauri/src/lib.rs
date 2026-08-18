@@ -6,6 +6,7 @@
 //! process supervision, and Tauri integration are intentionally added by later
 //! phase slices.
 
+pub mod app_events;
 pub mod bridge;
 pub mod lifecycle;
 pub mod opener;
