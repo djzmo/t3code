@@ -528,7 +528,12 @@ impl<R: tauri::Runtime> ShellPlatform for TauriShellPlatform<R> {
     }
 
     fn dialog_error(&mut self, params: DialogErrorParams) -> Result<(), String> {
-        eprintln!("{}: {}", params.title, params.content);
+        self.app
+            .dialog()
+            .message(params.content)
+            .title(params.title)
+            .kind(MessageDialogKind::Error)
+            .blocking_show();
         Ok(())
     }
 
