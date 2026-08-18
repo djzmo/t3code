@@ -8,6 +8,7 @@
 
 pub mod app_events;
 pub mod bridge;
+pub mod host;
 pub mod lifecycle;
 pub mod opener;
 pub mod rpc;
