@@ -1060,9 +1060,11 @@ fn setup_sidecar<R: tauri::Runtime>(
             )
         );
     }
+    let process_broker = ProcessBroker::new(BrokerConfig::default());
+    let binding_broker = process_broker.clone();
     let dispatcher = ShellDispatcher::new(
         TauriShellPlatform::new(app.handle().clone(), runtime.clone()),
-        RpcProcessBroker::new(ProcessBroker::new(BrokerConfig::default())),
+        RpcProcessBroker::new(process_broker),
     );
     let broker_events = dispatcher.subscribe_broker_events();
     let dispatcher = Arc::new(Mutex::new(dispatcher));
@@ -1124,6 +1126,14 @@ fn setup_sidecar<R: tauri::Runtime>(
         SidecarSupervisor::spawn(spec, hello, handlers)
             .map_err(|error| std::io::Error::other(error.to_string()))?,
     );
+    #[cfg(unix)]
+    binding_broker
+        .bind_host_group(sidecar.host_pid(), sidecar.host_pgid())
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    #[cfg(not(unix))]
+    binding_broker
+        .bind_host_group(sidecar.host_pid(), sidecar.host_pid())
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     runtime
         .set_sidecar(Arc::clone(&sidecar))
         .map_err(std::io::Error::other)?;

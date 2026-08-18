@@ -178,6 +178,14 @@ impl<P: ShellPlatform> ShellDispatcher<P> {
         self.broker_cleanup_applied
     }
 
+    /// Binds the process broker to the sidecar's verified host group before
+    /// any managed native child can be spawned.
+    pub fn bind_host_group(&self, host_pid: u32, host_pgid: u32) -> Result<(), RpcError> {
+        self.broker
+            .bind_host_group(host_pid, host_pgid)
+            .map_err(adapter_error)
+    }
+
     pub fn request(&mut self, request: RpcRequest) -> Result<RpcResult, RpcError> {
         let params = request.params;
         match request.method {
@@ -833,7 +841,10 @@ mod tests {
     fn dispatcher() -> ShellDispatcher<FakePlatform> {
         ShellDispatcher::new(
             FakePlatform::default(),
-            RpcProcessBroker::new(ProcessBroker::new(BrokerConfig::default())),
+            RpcProcessBroker::new(ProcessBroker::for_tests(
+                BrokerConfig::default(),
+                crate::host::identity::NativeIdentityBackend,
+            )),
         )
     }
 
@@ -1177,7 +1188,10 @@ mod tests {
         };
         let mut dispatch = ShellDispatcher::with_gate(
             platform,
-            RpcProcessBroker::new(ProcessBroker::new(BrokerConfig::default())),
+            RpcProcessBroker::new(ProcessBroker::for_tests(
+                BrokerConfig::default(),
+                crate::host::identity::NativeIdentityBackend,
+            )),
             gate,
         );
 
@@ -1223,7 +1237,10 @@ mod tests {
                 fail_window_notifications: true,
                 ..FakePlatform::default()
             },
-            RpcProcessBroker::new(ProcessBroker::new(BrokerConfig::default())),
+            RpcProcessBroker::new(ProcessBroker::for_tests(
+                BrokerConfig::default(),
+                crate::host::identity::NativeIdentityBackend,
+            )),
         );
         let result = dispatch.notification(RpcNotification {
             jsonrpc: JsonRpcVersion::V2,

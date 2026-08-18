@@ -15,6 +15,11 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use nix::unistd::{Pid, getpgid};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 use serde_json::Value;
 
 use crate::rpc::peer::{Peer, PeerCloseReason, PeerError, PeerEvent, PeerRole};
@@ -53,6 +58,8 @@ impl SidecarSpawnSpec {
             .stderr(Stdio::inherit())
             .env_remove("NODE_OPTIONS")
             .env_remove("NODE_PATH");
+        #[cfg(unix)]
+        command.process_group(0);
         if let Some(current_dir) = &self.current_dir {
             command.current_dir(current_dir);
         }
@@ -182,6 +189,9 @@ struct RuntimeState {
 struct Shared {
     state: Mutex<Option<RuntimeState>>,
     child: Mutex<Option<Child>>,
+    host_pid: u32,
+    #[cfg(unix)]
+    host_pgid: u32,
     closed: AtomicBool,
     handlers: SidecarHandlers,
 }
@@ -208,6 +218,11 @@ impl SidecarSupervisor {
             .command()
             .spawn()
             .map_err(|error| SidecarError::Spawn(error.to_string()))?;
+        let host_pid = child.id();
+        #[cfg(unix)]
+        let host_pgid = verify_host_group(host_pid).inspect_err(|_| {
+            terminate_retained_child(&mut child);
+        })?;
         let Some(stdin) = child.stdin.take() else {
             terminate_retained_child(&mut child);
             return Err(SidecarError::Spawn(
@@ -228,12 +243,28 @@ impl SidecarSupervisor {
                 queued_waiters: VecDeque::new(),
             })),
             child: Mutex::new(Some(child)),
+            host_pid,
+            #[cfg(unix)]
+            host_pgid,
             closed: AtomicBool::new(false),
             handlers,
         });
         spawn_reader(Arc::clone(&shared), stdout);
         spawn_watchdog(Arc::clone(&shared));
         Ok(Self { shared })
+    }
+
+    /// Returns the retained sidecar process id.
+    #[must_use]
+    pub fn host_pid(&self) -> u32 {
+        self.shared.host_pid
+    }
+
+    /// Returns the verified Unix process-group leader id.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn host_pgid(&self) -> u32 {
+        self.shared.host_pgid
     }
 
     /// Sends a typed request and waits synchronously for its response.
@@ -602,6 +633,15 @@ fn close_shared(
     for waiter in pending {
         waiter.complete(Err(SidecarError::Peer(format!("{reason:?}"))));
     }
+    // On an unexpected transport close, let the dispatcher tear down the
+    // retained host-group members while the sidecar leader is still held and
+    // unreaped. Reaping the leader first would permit PGID reuse and weaken
+    // the C6 barrier. Local shutdown already runs the lifecycle cleanup path
+    // before calling this function and does not need the callback.
+    let unexpected = !matches!(reason, PeerCloseReason::Local(_));
+    if unexpected {
+        (shared.handlers.unexpected_close)(reason);
+    }
     if let Ok(mut child_guard) = shared.child.lock()
         && let Some(mut child) = child_guard.take()
     {
@@ -609,9 +649,6 @@ fn close_shared(
             terminate_retained_child(&mut child);
         }
         let _ = child.wait();
-    }
-    if !matches!(reason, PeerCloseReason::Local(_)) {
-        (shared.handlers.unexpected_close)(reason);
     }
     Ok(())
 }
@@ -626,6 +663,21 @@ fn terminate_retained_child(child: &mut Child) {
         }
     }
     let _ = child.wait();
+}
+
+#[cfg(unix)]
+fn verify_host_group(pid: u32) -> Result<u32, SidecarError> {
+    let pid = i32::try_from(pid)
+        .map_err(|_| SidecarError::Spawn("sidecar pid is outside the Unix range".to_owned()))?;
+    let pid = Pid::from_raw(pid);
+    let pgid = getpgid(Some(pid)).map_err(|error| SidecarError::Spawn(error.to_string()))?;
+    if pgid != pid {
+        return Err(SidecarError::Spawn(format!(
+            "sidecar is not the leader of its process group: pid {pid}, pgid {pgid}"
+        )));
+    }
+    u32::try_from(pgid.as_raw())
+        .map_err(|_| SidecarError::Spawn("sidecar process group id is invalid".to_owned()))
 }
 
 fn decode_frame(frame: &[u8]) -> Result<RpcEnvelope, SidecarError> {
@@ -664,6 +716,7 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::rpc::protocol::RpcNotification;
+    use std::sync::Weak;
 
     #[test]
     fn sidecar_command_uses_the_pinned_entry_and_strips_node_injection() {
@@ -730,5 +783,69 @@ mod tests {
         waiter.complete(Ok(envelope.clone()));
 
         assert_eq!(waiter.wait(Duration::from_millis(1)), Ok(envelope));
+    }
+
+    #[test]
+    fn unexpected_close_notifies_before_reaping_the_retained_host() {
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("ping");
+            command.args(["127.0.0.1", "-n", "60"]);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = Command::new("sleep");
+            command.arg("60");
+            command
+        };
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("host fixture should spawn");
+        let stdin = child.stdin.take().expect("fixture stdin is piped");
+        let stdout = child.stdout.take().expect("fixture stdout is piped");
+        let observed = Arc::new(Mutex::new(None));
+        let observed_callback = Arc::clone(&observed);
+        let shared_slot: Arc<Mutex<Option<Weak<Shared>>>> = Arc::new(Mutex::new(None));
+        let callback_slot = Arc::clone(&shared_slot);
+        let handlers = SidecarHandlers {
+            unexpected_close: Arc::new(move |_| {
+                let has_retained_child = callback_slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().and_then(Weak::upgrade))
+                    .and_then(|shared| shared.child.lock().ok().map(|child| child.is_some()));
+                *observed_callback.lock().expect("observation lock") = has_retained_child;
+            }),
+            ..SidecarHandlers::default()
+        };
+        let shared = Arc::new(Shared {
+            state: Mutex::new(Some(RuntimeState {
+                peer: Peer::new(PeerRole::Shell, 0, None),
+                stdin,
+                waiters: std::collections::HashMap::new(),
+                queued_waiters: VecDeque::new(),
+            })),
+            child: Mutex::new(Some(child)),
+            host_pid: 0,
+            #[cfg(unix)]
+            host_pgid: 0,
+            closed: AtomicBool::new(false),
+            handlers,
+        });
+        *shared_slot.lock().expect("callback slot") = Some(Arc::downgrade(&shared));
+
+        close_shared(
+            &shared,
+            PeerCloseReason::Transport(crate::rpc::transport::TransportError::Closed),
+            true,
+        )
+        .expect("close should complete");
+        assert_eq!(*observed.lock().expect("observation lock"), Some(true));
+        assert!(shared.child.lock().expect("child lock").is_none());
+        let _ = stdout;
     }
 }

@@ -362,21 +362,18 @@ impl std::fmt::Display for BrokerError {
 
 impl std::error::Error for BrokerError {}
 
+/// Per-attempt outcomes produced after broker-wide transport cleanup succeeds.
+pub type TransportCloseReport = Vec<(AttemptToken, Result<ReleaseOutcome, BrokerError>)>;
+
 struct ProcessRecord {
     attempt_id: AttemptToken,
     identity: ProcessIdentity,
-    #[cfg(unix)]
-    process_group: ProcessGroup,
     child: Mutex<Child>,
     stdin: Mutex<Option<ChildStdin>>,
     additional_inputs: Mutex<HashMap<u32, File>>,
     state: Mutex<RecordState>,
-    /// Serializes non-reaping observation and final cleanup.  The group
-    /// leader must remain unreaped until cleanup has sent the group signal;
-    /// otherwise a recycled PGID could refer to an unrelated process group.
+    /// Serializes non-reaping observation and final cleanup.
     reap_gate: Mutex<()>,
-    #[cfg(unix)]
-    group_cleanup_safe: AtomicBool,
     streams_remaining: AtomicU64,
 }
 
@@ -396,11 +393,23 @@ struct BrokerState {
     cancelled_attempts: HashSet<AttemptToken>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpawnTransaction {
+    Spawning(AttemptToken),
+    Published(AttemptToken),
+}
+
 struct BrokerInner {
     state: Mutex<BrokerState>,
-    transaction: Mutex<Option<AttemptToken>>,
+    transaction: Mutex<Option<SpawnTransaction>>,
     transaction_ready: Condvar,
     identity: Arc<dyn IdentityBackend>,
+    #[cfg(unix)]
+    host_group: Mutex<Option<ProcessGroup>>,
+    #[cfg(unix)]
+    host_group_ready: Condvar,
+    #[cfg(unix)]
+    group_ops: Arc<dyn GroupOps>,
     events: Arc<EventQueue>,
     sequencer: Arc<EventSequencer>,
     next_token: AtomicU64,
@@ -409,34 +418,140 @@ struct BrokerInner {
     registration_barrier: Mutex<Option<Arc<RegistrationBarrier>>>,
     #[cfg(test)]
     close_barrier: Mutex<Option<Arc<RegistrationBarrier>>>,
+    #[cfg(test)]
+    spawn_publish_barrier: Mutex<Option<Arc<RegistrationBarrier>>>,
+    #[cfg(test)]
+    close_transaction_wait_barrier: Mutex<Option<Arc<RegistrationBarrier>>>,
+    #[cfg(all(test, unix))]
+    host_group_wait_barrier: Mutex<Option<Arc<RegistrationBarrier>>>,
 }
 
 #[cfg(unix)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProcessGroup {
+    leader_pid: u32,
     pgid: Pid,
 }
 
 #[cfg(unix)]
 impl ProcessGroup {
-    fn for_child(pid: u32) -> Result<Self, String> {
-        let pid =
-            i32::try_from(pid).map_err(|_| "child pid is outside the Unix range".to_owned())?;
-        if pid <= 1 {
-            return Err("refusing to manage a reserved process group".to_owned());
+    fn new(leader_pid: u32, pgid: u32) -> Result<Self, String> {
+        let leader_pid = i32::try_from(leader_pid)
+            .map_err(|_| "host process group leader is outside the Unix range".to_owned())?;
+        let pgid = i32::try_from(pgid)
+            .map_err(|_| "host process group is outside the Unix range".to_owned())?;
+        if leader_pid <= 1 || pgid <= 1 || leader_pid != pgid {
+            return Err("refusing to bind a non-leader or reserved process group".to_owned());
         }
-        let pgid = Pid::from_raw(pid);
-        let actual = getpgid(Some(pgid)).map_err(|error| error.to_string())?;
-        if actual != pgid {
-            return Err(format!(
-                "child process group mismatch: expected {pgid}, got {actual}"
-            ));
-        }
-        Ok(Self { pgid })
+        Ok(Self {
+            leader_pid: u32::try_from(leader_pid).map_err(|_| "invalid host pid".to_owned())?,
+            pgid: Pid::from_raw(pgid),
+        })
     }
 
-    fn terminate(&self) -> Result<(), nix::errno::Errno> {
-        killpg(self.pgid, Signal::SIGKILL)
+    fn leader_is_current(&self) -> Result<(), String> {
+        let leader = Pid::from_raw(
+            i32::try_from(self.leader_pid)
+                .map_err(|_| "host process group leader is outside the Unix range".to_owned())?,
+        );
+        let actual = getpgid(Some(leader)).map_err(|error| error.to_string())?;
+        if actual != self.pgid {
+            return Err(format!(
+                "host process group identity changed: expected {}, got {actual}",
+                self.pgid
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+trait GroupOps: Send + Sync {
+    fn verify_leader(&self, group: ProcessGroup) -> Result<(), String>;
+    fn members(&self, group: ProcessGroup) -> Result<Vec<u32>, String>;
+    fn signal_group(&self, group: ProcessGroup) -> Result<(), String>;
+}
+
+#[cfg(unix)]
+#[derive(Debug, Default, Clone, Copy)]
+struct NativeGroupOps;
+
+#[cfg(unix)]
+impl GroupOps for NativeGroupOps {
+    fn verify_leader(&self, group: ProcessGroup) -> Result<(), String> {
+        group.leader_is_current()
+    }
+
+    fn members(&self, group: ProcessGroup) -> Result<Vec<u32>, String> {
+        self.verify_leader(group)?;
+        #[cfg(target_os = "linux")]
+        {
+            let mut members = Vec::new();
+            let entries = std::fs::read_dir("/proc").map_err(|error| error.to_string())?;
+            for entry in entries {
+                let entry = entry.map_err(|error| error.to_string())?;
+                let name = entry.file_name();
+                let Ok(pid) = name.to_string_lossy().parse::<u32>() else {
+                    continue;
+                };
+                let Ok(pid_i32) = i32::try_from(pid) else {
+                    continue;
+                };
+                let pid = Pid::from_raw(pid_i32);
+                if getpgid(Some(pid)).is_ok_and(|actual| actual == group.pgid) {
+                    members.push(u32::try_from(pid.as_raw()).unwrap_or_default());
+                }
+            }
+            members.sort_unstable();
+            return Ok(members);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut members =
+                libproc::processes::pids_by_type(libproc::processes::ProcFilter::ByProgramGroup {
+                    pgrpid: u32::try_from(group.pgid.as_raw())
+                        .map_err(|_| "invalid process group id".to_owned())?,
+                })
+                .map_err(|error| error.to_string())?;
+            members.sort_unstable();
+            return Ok(members);
+        }
+        #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+        {
+            let _ = group;
+            Err("process-group membership scanning is unsupported on this Unix target".to_owned())
+        }
+    }
+
+    fn signal_group(&self, group: ProcessGroup) -> Result<(), String> {
+        self.verify_leader(group)?;
+        match killpg(group.pgid, Signal::SIGKILL) {
+            Ok(()) => Ok(()),
+            Err(error) if error == nix::errno::Errno::ESRCH => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+
+#[cfg(unix)]
+const MAX_GROUP_CLEANUP_PASSES: usize = 8;
+
+#[cfg(all(test, unix))]
+#[derive(Debug, Default, Clone, Copy)]
+struct TestGroupOps;
+
+#[cfg(all(test, unix))]
+impl GroupOps for TestGroupOps {
+    fn verify_leader(&self, _group: ProcessGroup) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn members(&self, group: ProcessGroup) -> Result<Vec<u32>, String> {
+        Ok(vec![group.leader_pid])
+    }
+
+    fn signal_group(&self, _group: ProcessGroup) -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -457,11 +572,94 @@ impl std::fmt::Debug for ProcessBroker {
 impl ProcessBroker {
     #[must_use]
     pub fn new(config: BrokerConfig) -> Self {
-        Self::with_identity_backend(config, NativeIdentityBackend)
+        #[cfg(unix)]
+        {
+            return Self::with_identity_and_group_ops(
+                config,
+                NativeIdentityBackend,
+                NativeGroupOps,
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            Self::with_identity_backend(config, NativeIdentityBackend)
+        }
     }
 
     #[must_use]
     pub fn with_identity_backend<B>(config: BrokerConfig, identity: B) -> Self
+    where
+        B: IdentityBackend + 'static,
+    {
+        #[cfg(unix)]
+        {
+            return Self::with_identity_and_group_ops(config, identity, NativeGroupOps);
+        }
+        #[cfg(not(unix))]
+        {
+            Self::with_identity_backend_impl(config, identity)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_tests<B>(config: BrokerConfig, identity: B) -> Self
+    where
+        B: IdentityBackend + 'static,
+    {
+        #[cfg(unix)]
+        {
+            let broker = Self::with_identity_and_group_ops(config, identity, TestGroupOps);
+            let group = getpgid(None)
+                .expect("test process group is available")
+                .as_raw();
+            let group = u32::try_from(group).expect("test process group id fits u32");
+            broker
+                .bind_host_group(group, group)
+                .expect("test process group binding succeeds");
+            broker
+        }
+        #[cfg(not(unix))]
+        {
+            Self::with_identity_backend(config, identity)
+        }
+    }
+
+    #[cfg(unix)]
+    fn with_identity_and_group_ops<B, G>(config: BrokerConfig, identity: B, group_ops: G) -> Self
+    where
+        B: IdentityBackend + 'static,
+        G: GroupOps + 'static,
+    {
+        let events = Arc::new(EventQueue::new(config));
+        Self {
+            inner: Arc::new(BrokerInner {
+                state: Mutex::new(BrokerState::default()),
+                transaction: Mutex::new(None),
+                transaction_ready: Condvar::new(),
+                identity: Arc::new(identity),
+                host_group: Mutex::new(None),
+                host_group_ready: Condvar::new(),
+                group_ops: Arc::new(group_ops),
+                events: events.clone(),
+                sequencer: Arc::new(EventSequencer::new(events)),
+                next_token: AtomicU64::new(1),
+                closed: AtomicBool::new(false),
+                #[cfg(test)]
+                registration_barrier: Mutex::new(None),
+                #[cfg(test)]
+                close_barrier: Mutex::new(None),
+                #[cfg(test)]
+                spawn_publish_barrier: Mutex::new(None),
+                #[cfg(test)]
+                close_transaction_wait_barrier: Mutex::new(None),
+                #[cfg(all(test, unix))]
+                host_group_wait_barrier: Mutex::new(None),
+            }),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn with_identity_backend_impl<B>(config: BrokerConfig, identity: B) -> Self
     where
         B: IdentityBackend + 'static,
     {
@@ -480,8 +678,82 @@ impl ProcessBroker {
                 registration_barrier: Mutex::new(None),
                 #[cfg(test)]
                 close_barrier: Mutex::new(None),
+                #[cfg(test)]
+                spawn_publish_barrier: Mutex::new(None),
+                #[cfg(test)]
+                close_transaction_wait_barrier: Mutex::new(None),
             }),
         }
+    }
+
+    /// Bind the broker to the already-spawned Unix host group leader.
+    ///
+    /// Binding is intentionally explicit: no managed child can be created
+    /// until the shell has proved that the retained sidecar is still the
+    /// leader of the expected group. Windows has no group binding and keeps
+    /// the registry-only containment model.
+    pub fn bind_host_group(&self, host_pid: u32, host_pgid: u32) -> Result<(), BrokerError> {
+        #[cfg(unix)]
+        {
+            let group =
+                ProcessGroup::new(host_pid, host_pgid).map_err(BrokerError::InvalidRequest)?;
+            if self.inner.closed.load(Ordering::Acquire) {
+                return Err(BrokerError::Closed);
+            }
+            self.inner
+                .group_ops
+                .verify_leader(group)
+                .map_err(BrokerError::Io)?;
+            let mut bound = lock(&self.inner.host_group);
+            match *bound {
+                Some(existing) if existing == group => Ok(()),
+                Some(_) => Err(BrokerError::InvalidRequest(
+                    "process broker host group is already bound".to_owned(),
+                )),
+                None => {
+                    *bound = Some(group);
+                    self.inner.host_group_ready.notify_all();
+                    Ok(())
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (host_pid, host_pgid);
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    fn bound_host_group(&self) -> Result<ProcessGroup, BrokerError> {
+        let mut bound = lock(&self.inner.host_group);
+        while bound.is_none() && !self.inner.closed.load(Ordering::Acquire) {
+            #[cfg(test)]
+            self.mark_host_group_wait_for_test();
+            bound = wait(&self.inner.host_group_ready, bound);
+        }
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Err(BrokerError::Closed);
+        }
+        bound.ok_or_else(|| {
+            BrokerError::InvalidRequest("process broker host group is not bound".to_owned())
+        })
+    }
+
+    #[cfg(unix)]
+    fn verify_child_group(&self, group: ProcessGroup, pid: u32) -> Result<(), String> {
+        self.inner.group_ops.verify_leader(group)?;
+        let pid =
+            i32::try_from(pid).map_err(|_| "child pid is outside the Unix range".to_owned())?;
+        let pid = Pid::from_raw(pid);
+        let actual = getpgid(Some(pid)).map_err(|error| error.to_string())?;
+        if actual != group.pgid {
+            return Err(format!(
+                "managed child joined unexpected process group: expected {}, got {actual}",
+                group.pgid
+            ));
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -495,6 +767,15 @@ impl ProcessBroker {
     pub fn spawn(&self, request: SpawnRequest) -> Result<SpawnedProcess, BrokerError> {
         validate_request(&request)?;
         let attempt_id = self.acquire_transaction()?;
+
+        #[cfg(unix)]
+        let host_group = match self.bound_host_group() {
+            Ok(group) => group,
+            Err(error) => {
+                self.finish_transaction(attempt_id);
+                return Err(error);
+            }
+        };
 
         #[cfg(unix)]
         let (additional_mappings, additional_inputs, additional_outputs) =
@@ -525,10 +806,10 @@ impl ProcessBroker {
         command.stderr(request.stderr.into_stdio());
 
         #[cfg(unix)]
-        // Keep every brokered direct child as the leader of its own process
-        // group.  Descendants that deliberately call `setsid`/detach are
-        // outside this group by design and remain the server's boundary.
-        command.process_group(0);
+        // Join the verified sidecar group. Descendants that deliberately call
+        // `setsid`/detach are outside this group by design and remain the
+        // server's boundary.
+        command.process_group(host_group.pgid.as_raw());
 
         #[cfg(unix)]
         if let Err(error) = command.fd_mappings(additional_mappings) {
@@ -550,15 +831,8 @@ impl ProcessBroker {
         let identity = match self.inner.identity.capture(&child, pid, spawned_at) {
             Ok(identity) => identity,
             Err(error) => {
-                // No record or waiter exists yet, so the retained child is
-                // still an unreaped process-group leader.  Kill its private
-                // group first; if the group operation is unavailable, the
-                // retained unreaped Child is still reserved against PID
-                // reuse and can be killed safely before being waited.
-                #[cfg(unix)]
-                if let Ok(process_group) = ProcessGroup::for_child(pid) {
-                    let _ = process_group.terminate();
-                }
+                // No record or waiter exists yet. The retained Child handle
+                // is the only permitted cleanup path for this direct child.
                 let _ = child.kill();
                 let _ = child.wait();
                 self.finish_transaction(attempt_id);
@@ -567,15 +841,12 @@ impl ProcessBroker {
         };
         let identity_proven = !matches!(identity.proof, super::identity::IdentityProof::Unproven);
         #[cfg(unix)]
-        let process_group = match ProcessGroup::for_child(pid) {
-            Ok(process_group) => process_group,
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                self.finish_transaction(attempt_id);
-                return Err(BrokerError::Spawn(error));
-            }
-        };
+        if let Err(error) = self.verify_child_group(host_group, pid) {
+            let _ = child.kill();
+            let _ = child.wait();
+            self.finish_transaction(attempt_id);
+            return Err(BrokerError::Spawn(error));
+        }
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -586,32 +857,30 @@ impl ProcessBroker {
         let record = Arc::new(ProcessRecord {
             attempt_id,
             identity,
-            #[cfg(unix)]
-            process_group,
             child: Mutex::new(child),
             stdin: Mutex::new(stdin),
             additional_inputs: Mutex::new(additional_inputs),
             state: Mutex::new(RecordState::default()),
             reap_gate: Mutex::new(()),
-            #[cfg(unix)]
-            group_cleanup_safe: AtomicBool::new(true),
             streams_remaining: AtomicU64::new(streams_remaining),
         });
+
+        #[cfg(test)]
+        self.pause_spawn_publish_for_test();
 
         {
             let mut state = lock(&self.inner.state);
             if self.inner.closed.load(Ordering::Acquire) {
-                drop(state);
-                // A close can race a spawn after the OS has created the child.
-                // Use the same identity gate as ordinary release; never fall
-                // back to a raw pid kill.
-                let mut child = lock(&record.child);
-                let _ = self.inner.identity.terminate(&mut child, &record.identity);
-                self.finish_transaction(attempt_id);
+                // Publish the retained child before ending the serialized
+                // transaction. The closer is waiting for this handoff and
+                // will include the record in group cleanup and final reaping.
+                state.attempts.insert(attempt_id, record);
+                self.publish_transaction(attempt_id);
                 return Err(BrokerError::Closed);
             }
             state.attempts.insert(attempt_id, record.clone());
         }
+        self.publish_transaction(attempt_id);
 
         if let Some(stdout) = stdout {
             spawn_reader(
@@ -827,12 +1096,26 @@ impl ProcessBroker {
     /// broker registry and are terminated only through their proven identity.
     /// A Unix backend that cannot prove identity reports an error and is never
     /// allowed to fall back to a raw pid signal.
-    pub fn transport_close(&self) -> Vec<(AttemptToken, Result<ReleaseOutcome, BrokerError>)> {
+    pub fn transport_close(&self) -> Result<TransportCloseReport, BrokerError> {
         if self.inner.closed.swap(true, Ordering::AcqRel) {
-            return Vec::new();
+            return Ok(Vec::new());
         }
+        #[cfg(unix)]
+        self.inner.host_group_ready.notify_all();
         #[cfg(test)]
         self.pause_close_for_test();
+        {
+            let mut transaction = lock(&self.inner.transaction);
+            while matches!(*transaction, Some(SpawnTransaction::Spawning(_))) {
+                #[cfg(test)]
+                self.mark_close_transaction_wait_for_test();
+                transaction = wait(&self.inner.transaction_ready, transaction);
+            }
+            if matches!(*transaction, Some(SpawnTransaction::Published(_))) {
+                *transaction = None;
+                self.inner.transaction_ready.notify_all();
+            }
+        }
         let records = {
             let mut state = lock(&self.inner.state);
             let records = state.attempts.drain().collect::<Vec<_>>();
@@ -843,16 +1126,22 @@ impl ProcessBroker {
                 .extend(records.iter().map(|(id, _)| *id));
             records
         };
-        {
-            let mut transaction = lock(&self.inner.transaction);
-            *transaction = None;
-            self.inner.transaction_ready.notify_all();
-        }
         self.inner.events.close();
-        records
+        #[cfg(unix)]
+        let group_result = lock(&self.inner.host_group)
+            .as_ref()
+            .copied()
+            .map(|group| self.cleanup_host_group(group, &records));
+        #[cfg(not(unix))]
+        let group_result: Option<Result<(), BrokerError>> = None;
+        let report = records
             .into_iter()
             .map(|(attempt, record)| (attempt, self.release_record(&record)))
-            .collect()
+            .collect();
+        if let Some(result) = group_result {
+            result?;
+        }
+        Ok(report)
     }
 
     #[must_use]
@@ -860,53 +1149,79 @@ impl ProcessBroker {
         self.inner.closed.load(Ordering::Acquire)
     }
 
+    #[cfg(unix)]
+    fn cleanup_host_group(
+        &self,
+        group: ProcessGroup,
+        records: &[(AttemptToken, Arc<ProcessRecord>)],
+    ) -> Result<(), BrokerError> {
+        for _ in 0..MAX_GROUP_CLEANUP_PASSES {
+            let members = self
+                .inner
+                .group_ops
+                .members(group)
+                .map_err(BrokerError::Io)?;
+            if members.into_iter().all(|pid| pid == group.leader_pid) {
+                return Ok(());
+            }
+            self.inner
+                .group_ops
+                .signal_group(group)
+                .map_err(BrokerError::Io)?;
+            self.reap_group_records(records)?;
+        }
+        let members = self
+            .inner
+            .group_ops
+            .members(group)
+            .map_err(BrokerError::Io)?;
+        if members.into_iter().all(|pid| pid == group.leader_pid) {
+            Ok(())
+        } else {
+            Err(BrokerError::Io(
+                "process-group cleanup did not reach quiescence before the pass cap".to_owned(),
+            ))
+        }
+    }
+
+    #[cfg(unix)]
+    fn reap_group_records(
+        &self,
+        records: &[(AttemptToken, Arc<ProcessRecord>)],
+    ) -> Result<(), BrokerError> {
+        for (_, record) in records {
+            let _reap_guard = lock(&record.reap_gate);
+            if lock(&record.state).leader_reaped {
+                continue;
+            }
+            let status = lock(&record.child)
+                .wait()
+                .map_err(|error| BrokerError::Io(error.to_string()))?;
+            let mut state = lock(&record.state);
+            state.exit = Some(ExitStatusInfo::from_status(status));
+            state.leader_reaped = true;
+        }
+        Ok(())
+    }
+
     fn release_record(&self, record: &Arc<ProcessRecord>) -> Result<ReleaseOutcome, BrokerError> {
         let _reap_guard = lock(&record.reap_gate);
         let mut child = lock(&record.child);
-        #[cfg(unix)]
-        let leader_reaped = lock(&record.state).leader_reaped;
-        #[cfg(not(unix))]
-        let _leader_reaped = lock(&record.state).leader_reaped;
-        #[cfg(unix)]
-        let group_cleanup_safe = record.group_cleanup_safe.load(Ordering::Acquire);
-
-        // A non-reaped group leader reserves its PGID.  Signal the group
-        // while the reservation is held, then let the identity backend deal
-        // with the direct child and reap the leader last.  If observation had
-        // to fall back to Child::try_wait, the leader may already have been
-        // reaped, so fail closed and never signal that recycled PGID.
-        #[cfg(unix)]
-        let group_cleanup_attempted = !leader_reaped && group_cleanup_safe;
-        #[cfg(unix)]
-        let group_result = if group_cleanup_attempted {
-            match record.process_group.terminate() {
-                Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
-                Err(error) => Err(BrokerError::Io(format!(
-                    "process-group cleanup failed: {error}"
-                ))),
-            }
-        } else {
-            Ok(())
-        };
-        #[cfg(not(unix))]
-        let group_cleanup_attempted = false;
-        #[cfg(not(unix))]
-        let group_result: Result<(), BrokerError> = Ok(());
-
         let identity = record.identity.clone();
         let identity_result = self.inner.identity.terminate(&mut child, &identity);
-        let direct_outcome = identity_result.as_ref().map(|result| match result {
+        let outcome = identity_result.as_ref().map(|result| match result {
             TerminateResult::Terminated => ReleaseOutcome::Terminated,
             TerminateResult::AlreadyExited => ReleaseOutcome::AlreadyExited,
         });
 
-        let mut reap_error = None;
-        if matches!(identity_result, Ok(TerminateResult::AlreadyExited)) {
-            // The identity backend may have observed and reaped a naturally
-            // exited leader while checking its proof.  Do not call wait a
-            // second time in that case.
+        if matches!(&identity_result, Ok(TerminateResult::AlreadyExited)) {
+            // `IdentityBackend::terminate` may have reaped a naturally exited
+            // child while checking its proof. Do not wait a second time.
             lock(&record.state).leader_reaped = true;
-        } else if group_result.is_ok() && group_cleanup_attempted {
+        } else if matches!(&identity_result, Ok(TerminateResult::Terminated)) {
+            // Individual release/cancel uses only the retained identity. The
+            // direct handle is then waited synchronously; no group signal is
+            // permitted on this path.
             match child.wait() {
                 Ok(status) => {
                     let mut state = lock(&record.state);
@@ -914,7 +1229,8 @@ impl ProcessBroker {
                     state.leader_reaped = true;
                 }
                 Err(error) => {
-                    reap_error = Some(BrokerError::Io(error.to_string()));
+                    lock(&record.state).released = true;
+                    return Err(BrokerError::Io(error.to_string()));
                 }
             }
         }
@@ -922,23 +1238,7 @@ impl ProcessBroker {
         let mut state = lock(&record.state);
         state.released = true;
         state.registration_id = None;
-        if let Some(error) = reap_error {
-            return Err(error);
-        }
-        group_result?;
-        match direct_outcome {
-            Ok(outcome) => Ok(outcome),
-            Err(error) => {
-                // A successful group kill is an identity-safe termination of
-                // this retained group leader even when a platform backend
-                // reports that its direct-child proof is unavailable.
-                #[cfg(unix)]
-                if group_cleanup_attempted {
-                    return Ok(ReleaseOutcome::Terminated);
-                }
-                Err(BrokerError::Identity(error.clone()))
-            }
-        }
+        outcome.map_err(|error| BrokerError::Identity(error.clone()))
     }
 
     fn find_attempt(&self, attempt_id: AttemptToken) -> Result<Arc<ProcessRecord>, BrokerError> {
@@ -986,13 +1286,24 @@ impl ProcessBroker {
             return Err(BrokerError::Closed);
         }
         let attempt_id = self.next_token();
-        *transaction = Some(attempt_id);
+        *transaction = Some(SpawnTransaction::Spawning(attempt_id));
         Ok(attempt_id)
+    }
+
+    fn publish_transaction(&self, attempt_id: AttemptToken) {
+        let mut transaction = lock(&self.inner.transaction);
+        if *transaction == Some(SpawnTransaction::Spawning(attempt_id)) {
+            *transaction = Some(SpawnTransaction::Published(attempt_id));
+            self.inner.transaction_ready.notify_all();
+        }
     }
 
     fn finish_transaction(&self, attempt_id: AttemptToken) {
         let mut transaction = lock(&self.inner.transaction);
-        if transaction.as_ref() == Some(&attempt_id) {
+        if matches!(
+            *transaction,
+            Some(SpawnTransaction::Spawning(id) | SpawnTransaction::Published(id)) if id == attempt_id
+        ) {
             *transaction = None;
             self.inner.transaction_ready.notify_all();
         }
@@ -1017,6 +1328,30 @@ impl ProcessBroker {
         let barrier = lock(&self.inner.close_barrier).clone();
         if let Some(barrier) = barrier {
             barrier.pause();
+        }
+    }
+
+    #[cfg(test)]
+    fn pause_spawn_publish_for_test(&self) {
+        let barrier = lock(&self.inner.spawn_publish_barrier).clone();
+        if let Some(barrier) = barrier {
+            barrier.pause();
+        }
+    }
+
+    #[cfg(test)]
+    fn mark_close_transaction_wait_for_test(&self) {
+        let barrier = lock(&self.inner.close_transaction_wait_barrier).clone();
+        if let Some(barrier) = barrier {
+            barrier.mark_reached();
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    fn mark_host_group_wait_for_test(&self) {
+        let barrier = lock(&self.inner.host_group_wait_barrier).clone();
+        if let Some(barrier) = barrier {
+            barrier.mark_reached();
         }
     }
 }
@@ -1050,15 +1385,17 @@ impl RegistrationBarrier {
     }
 
     fn pause(&self) {
-        {
-            let mut reached = lock(&self.reached);
-            *reached = true;
-            self.reached_ready.notify_all();
-        }
+        self.mark_reached();
         let mut released = lock(&self.released);
         while !*released {
             released = wait(&self.released_ready, released);
         }
+    }
+
+    fn mark_reached(&self) {
+        let mut reached = lock(&self.reached);
+        *reached = true;
+        self.reached_ready.notify_all();
     }
 
     fn wait_until_reached(&self) {
@@ -1380,11 +1717,10 @@ fn spawn_waiter(record: Arc<ProcessRecord>, inner: Arc<BrokerInner>) {
                     Ok(None) => {}
                     Err(_) => {
                         // If WNOWAIT/waitid is unavailable, fall back to
-                        // std's reaping wait only after disabling group
-                        // cleanup.  A reaped leader no longer reserves its
-                        // PGID, so release_record will never signal it.
-                        #[cfg(unix)]
-                        record.group_cleanup_safe.store(false, Ordering::Release);
+                        // std's reaping wait. Individual release uses the
+                        // retained child identity and transport-wide group
+                        // cleanup is gated by the separately retained host
+                        // leader, so this child need not reserve a PGID.
                         let mut child = lock(&record.child);
                         if let Ok(Some(status)) = child.try_wait() {
                             let status = ExitStatusInfo::from_status(status);
@@ -1542,6 +1878,8 @@ fn wait<'a, T>(
 mod tests {
     use super::*;
     use crate::host::identity::{IdentityProof, TerminateResult};
+    #[cfg(unix)]
+    use std::collections::VecDeque;
     use std::sync::mpsc;
 
     #[derive(Debug, Default, Clone, Copy)]
@@ -1584,14 +1922,19 @@ mod tests {
         SpawnRequest::new(program).with_args(args.iter().copied())
     }
 
+    #[cfg(unix)]
     fn fast_exit() -> SpawnRequest {
+        request("true", &[])
+    }
+
+    fn fast_output_exit() -> SpawnRequest {
         #[cfg(windows)]
         {
-            request("cmd", &["/C", "exit", "0"])
+            request("cmd", &["/D", "/C", "echo early-output"])
         }
         #[cfg(not(windows))]
         {
-            request("true", &[])
+            request("sh", &["-c", "printf early-output"])
         }
     }
 
@@ -1604,6 +1947,171 @@ mod tests {
         {
             request("sleep", &["60"])
         }
+    }
+
+    #[cfg(unix)]
+    #[derive(Debug, Default)]
+    struct RecordingGroupOps {
+        scans: Mutex<VecDeque<Vec<u32>>>,
+        signals: Mutex<Vec<ProcessGroup>>,
+    }
+
+    #[cfg(unix)]
+    impl GroupOps for RecordingGroupOps {
+        fn verify_leader(&self, _group: ProcessGroup) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn members(&self, group: ProcessGroup) -> Result<Vec<u32>, String> {
+            let mut scans = lock(&self.scans);
+            Ok(scans.pop_front().unwrap_or_else(|| vec![group.leader_pid]))
+        }
+
+        fn signal_group(&self, group: ProcessGroup) -> Result<(), String> {
+            lock(&self.signals).push(group);
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    #[derive(Debug, Clone)]
+    struct SharedGroupOps(Arc<RecordingGroupOps>);
+
+    #[cfg(unix)]
+    impl GroupOps for SharedGroupOps {
+        fn verify_leader(&self, group: ProcessGroup) -> Result<(), String> {
+            self.0.verify_leader(group)
+        }
+
+        fn members(&self, group: ProcessGroup) -> Result<Vec<u32>, String> {
+            self.0.members(group)
+        }
+
+        fn signal_group(&self, group: ProcessGroup) -> Result<(), String> {
+            self.0.signal_group(group)
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transport_close_signals_reserved_group_for_each_delayed_member_pass() {
+        let ops = Arc::new(RecordingGroupOps {
+            scans: Mutex::new(VecDeque::from([
+                vec![100, 200],
+                vec![100, 300],
+                vec![100],
+                vec![999], // ignored after the first quiescent scan
+            ])),
+            signals: Mutex::new(Vec::new()),
+        });
+        let broker = ProcessBroker::with_identity_and_group_ops(
+            BrokerConfig::default(),
+            TestIdentityBackend,
+            SharedGroupOps(ops.clone()),
+        );
+        broker
+            .bind_host_group(100, 100)
+            .expect("recording group accepts the binding");
+        assert!(
+            broker
+                .transport_close()
+                .expect("group cleanup reaches quiescence")
+                .is_empty()
+        );
+        assert_eq!(
+            lock(&ops.signals).as_slice(),
+            &[ProcessGroup {
+                leader_pid: 100,
+                pgid: Pid::from_raw(100),
+            }; 2]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transport_close_caps_group_signals_and_does_not_signal_after_final_scan() {
+        let ops = Arc::new(RecordingGroupOps {
+            scans: Mutex::new(VecDeque::from_iter(std::iter::repeat_n(
+                vec![100, 200],
+                MAX_GROUP_CLEANUP_PASSES + 1,
+            ))),
+            signals: Mutex::new(Vec::new()),
+        });
+        let broker = ProcessBroker::with_identity_and_group_ops(
+            BrokerConfig::default(),
+            TestIdentityBackend,
+            SharedGroupOps(ops.clone()),
+        );
+        broker
+            .bind_host_group(100, 100)
+            .expect("recording group accepts the binding");
+        let report = broker.transport_close();
+        assert!(matches!(report, Err(BrokerError::Io(message)) if message.contains("pass cap")));
+        assert_eq!(
+            lock(&ops.signals).len(),
+            MAX_GROUP_CLEANUP_PASSES,
+            "the cap stops further group signals"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transport_close_waits_for_active_spawn_before_quiescent_group_scan() {
+        let group = getpgid(None)
+            .expect("test process group is available")
+            .as_raw();
+        let group = u32::try_from(group).expect("test process group id fits u32");
+        let ops = Arc::new(RecordingGroupOps {
+            scans: Mutex::new(VecDeque::from([vec![group, 777], vec![group]])),
+            signals: Mutex::new(Vec::new()),
+        });
+        let broker = ProcessBroker::with_identity_and_group_ops(
+            BrokerConfig::default(),
+            TestIdentityBackend,
+            SharedGroupOps(ops.clone()),
+        );
+        broker
+            .bind_host_group(group, group)
+            .expect("recording group accepts the binding");
+        let spawn_barrier = Arc::new(RegistrationBarrier::new());
+        let close_wait_barrier = Arc::new(RegistrationBarrier::new());
+        *lock(&broker.inner.spawn_publish_barrier) = Some(spawn_barrier.clone());
+        *lock(&broker.inner.close_transaction_wait_barrier) = Some(close_wait_barrier.clone());
+
+        let (spawn_sender, spawn_receiver) = mpsc::sync_channel(1);
+        let spawn_broker = broker.clone();
+        thread::spawn(move || {
+            spawn_sender
+                .send(spawn_broker.spawn(fast_exit()))
+                .expect("spawn receiver remains open");
+        });
+        spawn_barrier.wait_until_reached();
+
+        let (close_sender, close_receiver) = mpsc::sync_channel(1);
+        let close_broker = broker.clone();
+        thread::spawn(move || {
+            close_sender
+                .send(close_broker.transport_close())
+                .expect("close receiver remains open");
+        });
+        close_wait_barrier.wait_until_reached();
+
+        assert_eq!(lock(&ops.scans).len(), 2, "cleanup has not scanned yet");
+        assert!(lock(&ops.signals).is_empty());
+        assert!(close_receiver.try_recv().is_err());
+
+        spawn_barrier.release();
+        assert_eq!(
+            spawn_receiver.recv().expect("spawn finishes after release"),
+            Err(BrokerError::Closed)
+        );
+        let report = close_receiver
+            .recv()
+            .expect("close finishes after the active spawn")
+            .expect("group reaches quiescence");
+        assert_eq!(report.len(), 1, "the late spawn record is drained");
+        assert!(lock(&ops.scans).is_empty(), "cleanup reached quiescence");
+        assert_eq!(lock(&ops.signals).len(), 1);
     }
 
     #[test]
@@ -1623,14 +2131,50 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
-    fn fast_exit_returns_null_registration_and_exit_event() {
+    fn unix_spawn_waits_for_the_explicit_host_group_binding() {
         let broker =
             ProcessBroker::with_identity_backend(BrokerConfig::default(), TestIdentityBackend);
+        let wait_barrier = Arc::new(RegistrationBarrier::new());
+        *lock(&broker.inner.host_group_wait_barrier) = Some(wait_barrier.clone());
+        let spawning = {
+            let broker = broker.clone();
+            thread::spawn(move || broker.spawn(fast_exit()))
+        };
+        wait_barrier.wait_until_reached();
+        let group = getpgid(None)
+            .expect("test process group is available")
+            .as_raw();
+        let group = u32::try_from(group).expect("test process group id fits u32");
+        broker
+            .bind_host_group(group, group)
+            .expect("host group binding succeeds");
+        let spawned = spawning
+            .join()
+            .expect("spawn thread joins")
+            .expect("gated spawn succeeds");
+        let _ = broker.cancel(spawned.attempt_id);
+    }
+
+    #[test]
+    fn fast_exit_returns_null_registration_and_exit_event() {
+        let broker = ProcessBroker::for_tests(BrokerConfig::default(), TestIdentityBackend);
         let stream = broker.events();
-        let spawned = broker.spawn(fast_exit()).expect("fast child should spawn");
-        let event = stream.next().expect("fast child should emit exit");
-        assert!(matches!(event, BrokerEvent::Exit { .. }));
+        let spawned = broker
+            .spawn(fast_output_exit())
+            .expect("fast output child should spawn");
+        let output = stream.next().expect("fast child should emit stdout");
+        assert!(matches!(
+            output,
+            BrokerEvent::Output {
+                stream: OutputStream::Stdout,
+                ref bytes,
+                ..
+            } if bytes.starts_with(b"early-output")
+        ));
+        let exit = stream.next().expect("fast child should emit exit");
+        assert!(matches!(exit, BrokerEvent::Exit { .. }));
         let outcome = broker
             .register(spawned.attempt_id)
             .expect("attempt remains registerable");
@@ -1640,8 +2184,7 @@ mod tests {
 
     #[test]
     fn null_stdin_does_not_retain_a_writer() {
-        let broker =
-            ProcessBroker::with_identity_backend(BrokerConfig::default(), TestIdentityBackend);
+        let broker = ProcessBroker::for_tests(BrokerConfig::default(), TestIdentityBackend);
         let mut request = long_running();
         request.stdin = StdioMode::Null;
         let spawned = broker.spawn(request).expect("child should spawn");
@@ -1660,8 +2203,7 @@ mod tests {
 
     #[test]
     fn null_output_does_not_emit_a_stream_event() {
-        let broker =
-            ProcessBroker::with_identity_backend(BrokerConfig::default(), TestIdentityBackend);
+        let broker = ProcessBroker::for_tests(BrokerConfig::default(), TestIdentityBackend);
         let stream = broker.events();
         let mut request = output_probe();
         request.stderr = StdioMode::Null;
@@ -1698,8 +2240,7 @@ mod tests {
 
     #[test]
     fn concurrent_children_start_output_sequences_at_zero() {
-        let broker =
-            ProcessBroker::with_identity_backend(BrokerConfig::default(), TestIdentityBackend);
+        let broker = ProcessBroker::for_tests(BrokerConfig::default(), TestIdentityBackend);
         let stream = broker.events();
         let first = broker
             .spawn(output_probe())
@@ -1754,8 +2295,7 @@ mod tests {
 
     #[test]
     fn stale_token_after_cancel_is_rejected_and_release_is_idempotent() {
-        let broker =
-            ProcessBroker::with_identity_backend(BrokerConfig::default(), TestIdentityBackend);
+        let broker = ProcessBroker::for_tests(BrokerConfig::default(), TestIdentityBackend);
         let spawned = broker
             .spawn(long_running())
             .expect("long child should spawn");
@@ -1779,8 +2319,7 @@ mod tests {
 
     #[test]
     fn cancellation_removes_pending_attempt_and_is_idempotent() {
-        let broker =
-            ProcessBroker::with_identity_backend(BrokerConfig::default(), TestIdentityBackend);
+        let broker = ProcessBroker::for_tests(BrokerConfig::default(), TestIdentityBackend);
         let spawned = broker
             .spawn(long_running())
             .expect("long child should spawn");
@@ -1800,8 +2339,7 @@ mod tests {
 
     #[test]
     fn transport_close_clears_registered_children_and_stale_tokens() {
-        let broker =
-            ProcessBroker::with_identity_backend(BrokerConfig::default(), TestIdentityBackend);
+        let broker = ProcessBroker::for_tests(BrokerConfig::default(), TestIdentityBackend);
         let first = broker.spawn(long_running()).expect("child should spawn");
         let first_registration = broker
             .register(first.attempt_id)
@@ -1809,7 +2347,9 @@ mod tests {
             .registration_id
             .expect("live registration");
         let second = broker.spawn(long_running()).expect("child should spawn");
-        let report = broker.transport_close();
+        let report = broker
+            .transport_close()
+            .expect("transport cleanup succeeds");
         assert_eq!(report.len(), 2);
         assert!(broker.is_closed());
         assert!(matches!(
@@ -1824,8 +2364,7 @@ mod tests {
 
     #[test]
     fn registration_ack_and_transport_close_cannot_leave_a_late_token() {
-        let broker =
-            ProcessBroker::with_identity_backend(BrokerConfig::default(), TestIdentityBackend);
+        let broker = ProcessBroker::for_tests(BrokerConfig::default(), TestIdentityBackend);
         let spawned = broker.spawn(long_running()).expect("child should spawn");
         let registration_barrier = Arc::new(RegistrationBarrier::new());
         let close_barrier = Arc::new(RegistrationBarrier::new());
@@ -1869,7 +2408,8 @@ mod tests {
         close_barrier.release();
         let report = close_receiver
             .recv()
-            .expect("close should finish after the barrier");
+            .expect("close should finish after the barrier")
+            .expect("transport cleanup succeeds");
         assert_eq!(report.len(), 1);
         assert!(lock(&broker.inner.state).registrations.is_empty());
     }

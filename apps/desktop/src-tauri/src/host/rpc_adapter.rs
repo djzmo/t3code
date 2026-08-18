@@ -144,6 +144,14 @@ impl RpcProcessBroker {
         &self.broker
     }
 
+    /// Binds native children to the verified sidecar process group on Unix.
+    /// Windows keeps the registry-only containment model.
+    pub fn bind_host_group(&self, host_pid: u32, host_pgid: u32) -> Result<(), RpcAdapterError> {
+        self.broker
+            .bind_host_group(host_pid, host_pgid)
+            .map_err(RpcAdapterError::from)
+    }
+
     /// Subscribes to the broker's bounded event queue without borrowing the
     /// adapter or its shell/platform dispatcher.
     #[must_use]
@@ -326,16 +334,13 @@ impl RpcProcessBroker {
     }
 
     pub fn transport_close(&mut self) -> Result<(), RpcAdapterError> {
-        let cleanup_error = self
-            .broker
-            .transport_close()
-            .into_iter()
-            .find_map(|(_, result)| result.err());
+        let cleanup = self.broker.transport_close();
         let mut state = lock_state(&self.state);
         state.attempts.clear();
         state.processes.clear();
         state.registrations.clear();
         state.exited_processes.clear();
+        let cleanup_error = cleanup?.into_iter().find_map(|(_, result)| result.err());
         cleanup_error.map_or(Ok(()), |error| Err(error.into()))
     }
 
@@ -652,7 +657,10 @@ mod tests {
 
     #[test]
     fn blocked_receiver_does_not_hold_adapter_during_spawn_or_cancel() {
-        let mut adapter = RpcProcessBroker::new(ProcessBroker::new(BrokerConfig::default()));
+        let mut adapter = RpcProcessBroker::new(ProcessBroker::for_tests(
+            BrokerConfig::default(),
+            crate::host::identity::NativeIdentityBackend,
+        ));
         let receiver = adapter.subscribe_events();
         let (ready_tx, ready_rx) = mpsc::channel();
         let consumer = thread::spawn(move || {
@@ -690,7 +698,10 @@ mod tests {
 
     #[test]
     fn blocked_receiver_wakes_when_transport_closes() {
-        let mut adapter = RpcProcessBroker::new(ProcessBroker::new(BrokerConfig::default()));
+        let mut adapter = RpcProcessBroker::new(ProcessBroker::for_tests(
+            BrokerConfig::default(),
+            crate::host::identity::NativeIdentityBackend,
+        ));
         let receiver = adapter.subscribe_events();
         let (ready_tx, ready_rx) = mpsc::channel();
         let consumer = thread::spawn(move || {
@@ -712,7 +723,10 @@ mod tests {
         #[cfg(not(windows))]
         let request = params("sh", &["-c", "printf broker-output"]);
 
-        let mut adapter = RpcProcessBroker::new(ProcessBroker::new(BrokerConfig::default()));
+        let mut adapter = RpcProcessBroker::new(ProcessBroker::for_tests(
+            BrokerConfig::default(),
+            crate::host::identity::NativeIdentityBackend,
+        ));
         let spawned = adapter.spawn(request).expect("fixture process spawns");
         assert!(spawned.process_id.starts_with("process-"));
 
@@ -747,7 +761,10 @@ mod tests {
         #[cfg(not(windows))]
         let request = params("true", &[]);
 
-        let mut adapter = RpcProcessBroker::new(ProcessBroker::new(BrokerConfig::default()));
+        let mut adapter = RpcProcessBroker::new(ProcessBroker::for_tests(
+            BrokerConfig::default(),
+            crate::host::identity::NativeIdentityBackend,
+        ));
         let spawned = adapter.spawn(request).expect("fixture process spawns");
         let registration_id = spawned
             .registration_id
@@ -782,7 +799,10 @@ mod tests {
         #[cfg(not(windows))]
         let request = params("true", &[]);
 
-        let mut adapter = RpcProcessBroker::new(ProcessBroker::new(BrokerConfig::default()));
+        let mut adapter = RpcProcessBroker::new(ProcessBroker::for_tests(
+            BrokerConfig::default(),
+            crate::host::identity::NativeIdentityBackend,
+        ));
         let spawned = adapter.spawn(request).expect("fixture process spawns");
         let registration_id = spawned
             .registration_id
@@ -821,7 +841,10 @@ mod tests {
             fd: 3,
             direction: ProcessFdDirection::Output,
         });
-        let mut adapter = RpcProcessBroker::new(ProcessBroker::new(BrokerConfig::default()));
+        let mut adapter = RpcProcessBroker::new(ProcessBroker::for_tests(
+            BrokerConfig::default(),
+            crate::host::identity::NativeIdentityBackend,
+        ));
         let spawned = adapter.spawn(request).expect("fixture process spawns");
         let mut saw_extra = false;
         for _ in 0..4 {
@@ -859,7 +882,10 @@ mod tests {
             fd: 4,
             direction: ProcessFdDirection::Input,
         });
-        let mut adapter = RpcProcessBroker::new(ProcessBroker::new(BrokerConfig::default()));
+        let mut adapter = RpcProcessBroker::new(ProcessBroker::for_tests(
+            BrokerConfig::default(),
+            crate::host::identity::NativeIdentityBackend,
+        ));
         let spawned = adapter.spawn(request).expect("fixture process spawns");
         let registration_id = spawned
             .registration_id
