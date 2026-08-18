@@ -12,6 +12,8 @@ import {
   parseTauriArtifactArguments,
   resolveNodeSidecarDestination,
   resolveNodeSidecarSourceName,
+  resolveTauriBuildArguments,
+  resolveTauriCliCwd,
 } from "./build-tauri-artifact.ts";
 import { stageTauriResources } from "./lib/tauri-stage.ts";
 
@@ -34,6 +36,7 @@ const makeFixture = async () => {
   const monitor = NodePath.join(root, "t3-resource-monitor");
   const node = NodePath.join(root, "agent-nanoni-node-linux-x64");
   const nodeLicense = NodePath.join(root, "NODE_LICENSE.txt");
+  const update = NodePath.join(root, "app-update.yml");
   const stage = NodePath.join(root, "stage");
   const overlay = NodePath.join(root, "overlay.json");
 
@@ -45,8 +48,9 @@ const makeFixture = async () => {
   await NodeFS.writeFile(monitor, "monitor\n");
   await NodeFS.writeFile(node, "node\n");
   await NodeFS.writeFile(nodeLicense, "Node license\n");
+  await NodeFS.writeFile(update, "provider: tauri\n");
 
-  return { root, server, frontend, host, monitor, node, nodeLicense, stage, overlay };
+  return { root, server, frontend, host, monitor, node, nodeLicense, update, stage, overlay };
 };
 
 afterEach(async () => {
@@ -73,6 +77,7 @@ describe("Tauri artifact orchestration", () => {
       hostBundlePath: fixture.host,
       nodeSidecarPath: fixture.node,
       nodeLicensePath: fixture.nodeLicense,
+      appUpdateManifestPath: fixture.update,
       resourceMonitorPath: fixture.monitor,
       productVersion: metadata.productVersion,
       configOverlayPath: fixture.overlay,
@@ -84,6 +89,11 @@ describe("Tauri artifact orchestration", () => {
       },
       dependencies: {
         resolveMetadata: () => metadata,
+        validatePayload: async ({ stageRoot, nodeSidecarPath }) => {
+          expect(stageRoot).toBe(NodePath.resolve(fixture.stage));
+          expect(nodeSidecarPath).toBe(NodePath.join(fixture.stage, "agent-nanoni-node"));
+          return undefined;
+        },
         prepare: (context) => {
           expect(context.environment.NANONI_PRODUCT_VERSION).toBe("1.2.3");
         },
@@ -126,12 +136,13 @@ describe("Tauri artifact orchestration", () => {
           fixture.monitor,
           fixture.node,
           fixture.nodeLicense,
+          fixture.update,
         ].map(async (path) => (await NodeFS.stat(path)).size),
       )
     ).reduce((total, size) => total + size, 0);
     expect(result.payload).toEqual({
-      fileCount: 5,
-      regularFileCount: 5,
+      fileCount: 6,
+      regularFileCount: 6,
       symlinkCount: 0,
       directoryCount: 8,
       regularFileBytes: expectedBytes,
@@ -162,6 +173,7 @@ describe("Tauri artifact orchestration", () => {
         hostBundlePath: fixture.host,
         nodeSidecarPath: fixture.node,
         nodeLicensePath: fixture.nodeLicense,
+        appUpdateManifestPath: fixture.update,
         resourceMonitorPath: fixture.monitor,
         dependencies: {
           resolveMetadata: () => metadata,
@@ -192,6 +204,7 @@ describe("Tauri artifact orchestration", () => {
         hostBundlePath: fixture.host,
         nodeSidecarPath: fixture.node,
         nodeLicensePath: fixture.nodeLicense,
+        appUpdateManifestPath: fixture.update,
         resourceMonitorPath: fixture.monitor,
         dependencies: {
           resolveMetadata: () => metadata,
@@ -221,10 +234,12 @@ describe("Tauri artifact orchestration", () => {
       hostBundlePath: fixture.host,
       nodeSidecarPath: fixture.node,
       nodeLicensePath: fixture.nodeLicense,
+      appUpdateManifestPath: fixture.update,
       resourceMonitorPath: fixture.monitor,
       dependencies: {
         resolveMetadata: () => metadata,
         assertClerkAbsent: async () => undefined,
+        validatePayload: async () => undefined,
         stageResources: async (input) => {
           const result = await stageTauriResources(input);
           const linkPath = NodePath.join(result.stageRoot, "host-link");
@@ -238,12 +253,13 @@ describe("Tauri artifact orchestration", () => {
       },
     });
     expect(staged.payload.symlinkCount).toBe(1);
-    expect(staged.payload.fileCount).toBe(6);
+    expect(staged.payload.fileCount).toBe(7);
     expect(staged.payload.regularFileBytes).toBe(
       (await NodeFS.stat(fixture.host)).size +
         (await NodeFS.stat(fixture.node)).size +
         (await NodeFS.stat(fixture.monitor)).size +
         (await NodeFS.stat(fixture.nodeLicense)).size +
+        (await NodeFS.stat(fixture.update)).size +
         (await NodeFS.stat(NodePath.join(fixture.server, "apps/server/dist/bin.mjs"))).size,
     );
 
@@ -267,6 +283,7 @@ describe("Tauri artifact orchestration", () => {
         hostBundlePath: fixture.host,
         nodeSidecarPath: fixture.node,
         nodeLicensePath: fixture.nodeLicense,
+        appUpdateManifestPath: fixture.update,
         resourceMonitorPath: fixture.monitor,
         environment: { T3CODE_CLERK_JWT_TEMPLATE: "fork-jwt-only" },
         dependencies: { resolveMetadata: () => metadata },
@@ -290,6 +307,7 @@ describe("Tauri artifact orchestration", () => {
         hostBundlePath: fixture.host,
         nodeSidecarPath: fixture.node,
         nodeLicensePath: fixture.nodeLicense,
+        appUpdateManifestPath: fixture.update,
         resourceMonitorPath: fixture.monitor,
         dependencies: { resolveMetadata: () => metadata },
       }),
@@ -308,6 +326,7 @@ describe("Tauri artifact orchestration", () => {
         hostBundlePath: fixture.host,
         nodeSidecarPath: fixture.node,
         nodeLicensePath: fixture.nodeLicense,
+        appUpdateManifestPath: fixture.update,
         resourceMonitorPath: fixture.monitor,
         dependencies: { resolveMetadata: () => metadata },
       }),
@@ -340,7 +359,39 @@ describe("Tauri artifact orchestration", () => {
     expect(parsed.platform).toBe("win");
     expect(parsed.arch).toBe("arm64");
     expect(parsed.skipBuild).toBe(true);
+    expect(parsed.debug).toBe(false);
     expect(resolveNodeSidecarSourceName("win", "arm64")).toBe("agent-nanoni-node-win-arm64.exe");
+  });
+
+  it("derives target paths after root, platform, and architecture overrides", () => {
+    const parsed = parseTauriArtifactArguments([
+      "--root",
+      "D:/alternate",
+      "--platform",
+      "win",
+      "--arch",
+      "arm64",
+      "--product-version",
+      "1.2.3",
+      "--skip-build",
+      "--skip-smoke",
+    ]);
+
+    expect(parsed.serverClosurePath).toBe(
+      NodePath.join("D:/alternate", ".t3/tauri-server-closure/win-arm64"),
+    );
+    expect(parsed.nodeSidecarPath).toBe(
+      NodePath.join(
+        "D:/alternate",
+        "apps/desktop/src-tauri/binaries/agent-nanoni-node-win-arm64.exe",
+      ),
+    );
+    expect(parsed.resourceMonitorPath).toBe(
+      NodePath.join(
+        "D:/alternate",
+        "native/resource-monitor/target/release/t3-resource-monitor.exe",
+      ),
+    );
   });
 
   it("rejects CLI packaging without explicit version, license, or smoke binary", () => {
@@ -377,5 +428,14 @@ describe("Tauri artifact orchestration", () => {
       build: { frontendDist: NodePath.resolve("./dist") },
       bundle: { createUpdaterArtifacts: false },
     });
+  });
+
+  it("runs the Tauri CLI from the desktop project directory", () => {
+    expect(resolveTauriCliCwd("C:/repo")).toBe(NodePath.join("C:/repo", "apps/desktop"));
+  });
+
+  it("builds release artifacts by default and debug artifacts only when requested", () => {
+    expect(resolveTauriBuildArguments("tauri.js", "overlay.json", false)).not.toContain("--debug");
+    expect(resolveTauriBuildArguments("tauri.js", "overlay.json", true)).toContain("--debug");
   });
 });

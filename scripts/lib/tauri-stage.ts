@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off globalRandom:off - This helper is a build-time filesystem boundary.
 
 import * as NodeFS from "node:fs/promises";
+import { createReadStream as nodeCreateReadStream } from "node:fs";
 import * as NodePath from "node:path";
 
 import { resolveProductVersion } from "../tauri/resolve-product-version.ts";
@@ -21,7 +22,8 @@ export const TAURI_STAGE_LAYOUT = {
   updateManifest: "app-update.yml",
 } as const;
 
-const CLERK_KEY_PATTERN = /\bpk_(?:live|test)_[A-Za-z0-9_-]+\b/;
+const CLERK_KEY_PREFIXES = ["pk_live_", "pk_test_"] as const;
+const CLERK_SCAN_CHUNK_SIZE = 64 * 1024;
 const TEMP_DIRECTORY_SUFFIX = ".tmp";
 const BACKUP_DIRECTORY_SUFFIX = ".previous";
 
@@ -37,6 +39,8 @@ export interface TauriStageFileSystem {
   readonly rm: typeof NodeFS.rm;
   readonly rename: typeof NodeFS.rename;
   readonly readFile: typeof NodeFS.readFile;
+  /** Optional test seam; production scans use the bounded-memory stream below. */
+  readonly createReadStream?: typeof nodeCreateReadStream;
 }
 
 const defaultFileSystem: TauriStageFileSystem = {
@@ -50,6 +54,7 @@ const defaultFileSystem: TauriStageFileSystem = {
   rm: NodeFS.rm,
   rename: NodeFS.rename,
   readFile: NodeFS.readFile,
+  createReadStream: nodeCreateReadStream,
 };
 
 export interface TauriStageSources {
@@ -210,15 +215,106 @@ const copyTree = async (
   await fs.chmod(destination, info.mode & 0o7777);
 };
 
+const isAsciiWordByte = (byte: number | undefined): boolean =>
+  byte !== undefined &&
+  ((byte >= 0x30 && byte <= 0x39) ||
+    (byte >= 0x41 && byte <= 0x5a) ||
+    (byte >= 0x61 && byte <= 0x7a) ||
+    byte === 0x5f);
+
+const isClerkKeyByte = (byte: number): boolean => isAsciiWordByte(byte) || byte === 0x2d;
+
+/**
+ * Search one streamed chunk while retaining only the finite automaton state.
+ *
+ * The key body is intentionally unbounded in the pattern, so retaining a
+ * string tail would make memory usage proportional to a malicious asset. The
+ * state below tracks the prefix and the word/non-word boundary needed by the
+ * final `\\b`; it therefore detects matches split across any chunk boundary
+ * without buffering the file or an arbitrarily long candidate.
+ */
+const scanClerkBytes = (chunks: AsyncIterable<Uint8Array>): Promise<boolean> =>
+  (async () => {
+    let previousByte: number | undefined;
+    let prefix = "";
+    let keyActive = false;
+    let keyHasWordByte = false;
+    let keyLastWasWord = false;
+
+    const startPrefix = (byte: number): void => {
+      if (byte !== 0x70 || isAsciiWordByte(previousByte)) return; // `p`
+      prefix = "p";
+    };
+
+    const resetPrefix = (byte: number): void => {
+      prefix = "";
+      keyActive = false;
+      keyHasWordByte = false;
+      keyLastWasWord = false;
+      startPrefix(byte);
+    };
+
+    for await (const chunk of chunks) {
+      for (const byte of chunk) {
+        if (keyActive) {
+          if (isClerkKeyByte(byte)) {
+            const currentIsWord = isAsciiWordByte(byte);
+            if (keyLastWasWord && !currentIsWord) {
+              return true;
+            }
+            keyHasWordByte ||= currentIsWord;
+            keyLastWasWord = currentIsWord;
+            previousByte = byte;
+            continue;
+          }
+          if (keyLastWasWord) return true;
+          resetPrefix(byte);
+          previousByte = byte;
+          continue;
+        }
+
+        if (prefix !== "") {
+          const candidate = `${prefix}${String.fromCharCode(byte)}`;
+          const matchingPrefixes = CLERK_KEY_PREFIXES.filter((value) =>
+            value.startsWith(candidate),
+          );
+          if (matchingPrefixes.length === 0) {
+            resetPrefix(byte);
+            previousByte = byte;
+            continue;
+          }
+          prefix = candidate;
+          previousByte = byte;
+          if (matchingPrefixes.some((value) => value.length === prefix.length)) {
+            // The complete prefix is followed by a body whose first byte is
+            // consumed by the next iteration.
+            keyActive = true;
+            keyHasWordByte = false;
+            keyLastWasWord = false;
+          }
+          continue;
+        }
+
+        startPrefix(byte);
+        previousByte = byte;
+      }
+    }
+
+    return keyActive && keyHasWordByte && keyLastWasWord;
+  })();
+
 const scanTextFile = async (
   fs: TauriStageFileSystem,
   path: string,
   hits: string[],
 ): Promise<void> => {
   const info = await fs.lstat(path);
-  if (!info.isFile() || info.size > 8 * 1024 * 1024) return;
-  const contents = await fs.readFile(path, "utf8");
-  if (CLERK_KEY_PATTERN.test(contents)) hits.push(path);
+  if (!info.isFile()) return;
+  const createReadStream = fs.createReadStream ?? nodeCreateReadStream;
+  const stream = createReadStream(path, {
+    highWaterMark: CLERK_SCAN_CHUNK_SIZE,
+  });
+  if (await scanClerkBytes(stream)) hits.push(path);
 };
 
 const scanClerkPath = async (

@@ -134,6 +134,53 @@ describe("tauri resource staging", () => {
     }
   });
 
+  it("scans regular assets larger than 8 MiB without loading the file at once", async () => {
+    const fixture = await makeFixture();
+    try {
+      const largeAsset = NodePath.join(fixture.web, "assets/app.js");
+      const contents = Buffer.concat([
+        Buffer.alloc(8 * 1024 * 1024 + 17, 0x61),
+        Buffer.from("\nconst key = 'pk_live_large_asset';\n"),
+      ]);
+      await NodeFS.mkdir(NodePath.dirname(largeAsset), { recursive: true });
+      await NodeFS.writeFile(largeAsset, contents);
+
+      await assert.rejects(
+        assertClerkAbsent([fixture.web], {}),
+        (error: unknown) =>
+          error instanceof TauriStageError &&
+          error.code === "clerk-config-present" &&
+          error.message.includes(largeAsset),
+      );
+    } finally {
+      await removeFixture(fixture.root);
+    }
+  });
+
+  it("detects a publishable key split across scan stream chunks", async () => {
+    const fixture = await makeFixture();
+    try {
+      const boundaryAsset = NodePath.join(fixture.web, "assets/boundary.js");
+      const chunkSize = 64 * 1024;
+      const contents = Buffer.concat([
+        Buffer.alloc(chunkSize - 2, 0x20),
+        Buffer.from("pk_test_boundary_asset\n"),
+      ]);
+      await NodeFS.mkdir(NodePath.dirname(boundaryAsset), { recursive: true });
+      await NodeFS.writeFile(boundaryAsset, contents);
+
+      await assert.rejects(
+        assertClerkAbsent([fixture.web], {}),
+        (error: unknown) =>
+          error instanceof TauriStageError &&
+          error.code === "clerk-config-present" &&
+          error.message.includes(boundaryAsset),
+      );
+    } finally {
+      await removeFixture(fixture.root);
+    }
+  });
+
   it("rejects missing source paths without creating a partial stage", async () => {
     const fixture = await makeFixture();
     try {

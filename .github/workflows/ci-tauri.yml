@@ -28,10 +28,30 @@ jobs:
           cache: true
           run-install: true
 
+      - name: Verify pinned JavaScript toolchain
+        shell: bash
+        run: |
+          node --version | grep -E '^v24\.'
+          npm --version | grep -E '^11\.'
+          pnpm --version | grep -Fx '11.10.0'
+          vp --version
+
+      - name: Build server and Tauri host
+        run: |
+          vp run --filter t3 build
+          vp run --filter @t3tools/desktop build:tauri-host
+
       - name: Run protocol fixture round-trip tests
         run: >-
           vp test run
           apps/desktop/src/tauri/rpc/protocol.test.ts
+          apps/desktop/src/tauri/__tests__/host.integration.test.ts
+          apps/desktop/src/tauri/process/BrokeredChildSpawner.test.ts
+          apps/desktop/scripts/tauri/smoke-test.test.mjs
+          scripts/build-tauri-artifact.test.ts
+          scripts/lib/tauri-payload-validation.test.ts
+          scripts/lib/tauri-server-closure.test.ts
+          scripts/lib/tauri-stage.test.ts
           scripts/fetch-node-sidecar.test.ts
           scripts/tauri/check-remote-cli-pin.test.ts
           scripts/tauri/check-toolchain-alignment.test.ts
@@ -82,3 +102,159 @@ jobs:
 
       - name: Run locked Clippy checks
         run: cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+
+  tauri-artifact:
+    name: Tauri ${{ matrix.profile }} artifact (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux
+            arch: x64
+            profile: debug
+            debug_arg: --debug
+            node-sidecar: agent-nanoni-node-linux-x64
+            resource-monitor: t3-resource-monitor
+            binary: agent-nanoni-desktop
+            artifact-name: tauri-debug-linux
+          - os: windows-2022
+            platform: win
+            arch: x64
+            profile: debug
+            debug_arg: --debug
+            node-sidecar: agent-nanoni-node-win-x64.exe
+            resource-monitor: t3-resource-monitor.exe
+            binary: agent-nanoni-desktop.exe
+            artifact-name: tauri-debug-windows
+          - os: macos-14
+            platform: mac
+            arch: arm64
+            profile: debug
+            debug_arg: --debug
+            node-sidecar: agent-nanoni-node-darwin-arm64
+            resource-monitor: t3-resource-monitor
+            binary: agent-nanoni-desktop
+            artifact-name: tauri-debug-macos
+          - os: ubuntu-22.04
+            platform: linux
+            arch: x64
+            profile: release
+            debug_arg: ""
+            node-sidecar: agent-nanoni-node-linux-x64
+            resource-monitor: t3-resource-monitor
+            binary: agent-nanoni-desktop
+            artifact-name: tauri-release-linux
+          - os: windows-2022
+            platform: win
+            arch: x64
+            profile: release
+            debug_arg: ""
+            node-sidecar: agent-nanoni-node-win-x64.exe
+            resource-monitor: t3-resource-monitor.exe
+            binary: agent-nanoni-desktop.exe
+            artifact-name: tauri-release-windows
+          - os: macos-14
+            platform: mac
+            arch: arm64
+            profile: release
+            debug_arg: ""
+            node-sidecar: agent-nanoni-node-darwin-arm64
+            resource-monitor: t3-resource-monitor
+            binary: agent-nanoni-desktop
+            artifact-name: tauri-release-macos
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Tauri system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev xvfb
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Verify pinned JavaScript toolchain
+        shell: bash
+        run: |
+          node --version | grep -E '^v24\.'
+          npm --version | grep -E '^11\.'
+          pnpm --version | grep -Fx '11.10.0'
+          vp --version
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+
+      - name: Build unsigned Tauri artifact
+        shell: bash
+        run: >-
+          node scripts/build-tauri-artifact.ts
+          --platform ${{ matrix.platform }}
+          --arch ${{ matrix.arch }}
+          --server .t3/tauri-server-closure/${{ matrix.platform }}-${{ matrix.arch }}
+          --node apps/desktop/src-tauri/binaries/${{ matrix.node-sidecar }}
+          --node-license apps/desktop/src-tauri/binaries/NODE_LICENSE.txt
+          --resource-monitor native/resource-monitor/target/release/${{ matrix.resource-monitor }}
+          --app-update apps/desktop/src-tauri/app-update.yml
+          --product-version 1.0.0
+          --binary apps/desktop/src-tauri/target/${{ matrix.profile }}/${{ matrix.binary }}
+          ${{ matrix.debug_arg }}
+          --skip-smoke
+
+      - name: Run normal packaged smoke
+        if: matrix.profile == 'debug' && runner.os == 'Linux'
+        run: >-
+          xvfb-run -a node apps/desktop/scripts/tauri/smoke-test.mjs
+          --bundle apps/desktop/src-tauri/target/debug/${{ matrix.binary }}
+
+      - name: Run normal packaged smoke (macOS)
+        if: matrix.profile == 'debug' && runner.os == 'macOS'
+        run: >-
+          node apps/desktop/scripts/tauri/smoke-test.mjs
+          --bundle apps/desktop/src-tauri/target/debug/${{ matrix.binary }}
+
+      - name: Run forced-host packaged smoke
+        if: matrix.profile == 'debug' && runner.os == 'Linux'
+        run: >-
+          xvfb-run -a node apps/desktop/scripts/tauri/smoke-test.mjs
+          --bundle apps/desktop/src-tauri/target/debug/${{ matrix.binary }}
+          --kill-host
+
+      - name: Run forced-host packaged smoke (macOS)
+        if: matrix.profile == 'debug' && runner.os == 'macOS'
+        run: >-
+          node apps/desktop/scripts/tauri/smoke-test.mjs
+          --bundle apps/desktop/src-tauri/target/debug/${{ matrix.binary }}
+          --kill-host
+
+      - name: Document Windows fd transport boundary
+        if: matrix.profile == 'debug' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          @"
+          ## Windows Tauri CI boundary
+          - Rust tests, formatting, Clippy, and the unsigned artifact build ran on Windows.
+          - Packaged smoke remains gated until the Phase 0 Windows bootstrap transport is selected; POSIX additional-fd mappings cannot provide Node fd3/fd4/fd5 on Windows.
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Upload unsigned debug artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact-name }}
+          if-no-files-found: error
+          path: |
+            apps/desktop/src-tauri/target/${{ matrix.profile }}/${{ matrix.binary }}
+            apps/desktop/src-tauri/target/${{ matrix.profile }}/bundle

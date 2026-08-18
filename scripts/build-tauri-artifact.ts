@@ -6,13 +6,24 @@ import * as NodeFS from "node:fs/promises";
 import * as NodePath from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { NODE_SIDECAR_NAME, resolveNodeSidecarTriple } from "./fetch-node-sidecar.ts";
+import {
+  acquireNodeSidecar,
+  loadNodeSidecarConfig,
+  NODE_SIDECAR_NAME,
+  resolveNodeSidecarTriple,
+} from "./fetch-node-sidecar.ts";
+import { buildTauriServerClosure } from "./lib/tauri-server-closure.ts";
 import {
   assertClerkAbsent,
   stageTauriResources,
   type TauriStageResult,
   type TauriStageSources,
 } from "./lib/tauri-stage.ts";
+import {
+  validateTauriPayload,
+  type TauriPayloadValidationOptions,
+  type TauriPayloadValidationResult,
+} from "./lib/tauri-payload-validation.ts";
 import {
   resolveProductVersionMetadata,
   type ProductVersionChannel,
@@ -113,6 +124,10 @@ export interface TauriArtifactDependencies {
   ) => ProductVersionMetadata | Promise<ProductVersionMetadata>;
   readonly stageResources?: typeof stageTauriResources;
   readonly assertClerkAbsent?: typeof assertClerkAbsent;
+  /** Test seam; production always runs the real staged-payload probes. */
+  readonly validatePayload?: (
+    options: TauriPayloadValidationOptions,
+  ) => Promise<TauriPayloadValidationResult | undefined>;
   readonly writeOverlay?: (path: string, contents: string) => Promise<void>;
   readonly prepare?: TauriArtifactPrepareHook;
   readonly build?: TauriArtifactHook;
@@ -121,7 +136,10 @@ export interface TauriArtifactDependencies {
   readonly payloadBudgetLimits?: Partial<TauriArtifactPayloadLimits>;
 }
 
-export interface BuildTauriArtifactOptions extends TauriStageSources {
+export interface BuildTauriArtifactOptions extends Omit<
+  TauriStageSources,
+  "appUpdateManifestPath"
+> {
   readonly rootDir?: string;
   readonly platform: TauriArtifactPlatform;
   readonly arch: TauriArtifactArch;
@@ -129,6 +147,7 @@ export interface BuildTauriArtifactOptions extends TauriStageSources {
   readonly frontendDist: string;
   readonly nodeSidecarPath: string;
   readonly nodeLicensePath: string;
+  readonly appUpdateManifestPath: string;
   readonly productVersion?: string;
   readonly channel?: ProductVersionChannel;
   readonly date?: string;
@@ -148,6 +167,7 @@ export interface BuildTauriArtifactResult {
   readonly configOverlayPath: string;
   readonly configOverlay: TauriConfigOverlay;
   readonly payload: TauriArtifactPayloadStats;
+  readonly payloadValidation?: TauriPayloadValidationResult;
   readonly hooks: {
     readonly build: boolean;
     readonly smoke: ReadonlyArray<"normal" | "forced-kill">;
@@ -504,6 +524,11 @@ export const buildTauriArtifact = async (
     "resourceMonitorPath",
   );
   const nodeLicensePath = await assertFile(fs, options.nodeLicensePath, "nodeLicensePath");
+  const appUpdateManifestPath = await assertFile(
+    fs,
+    options.appUpdateManifestPath,
+    "appUpdateManifestPath",
+  );
 
   const expectedNodeName = resolveNodeSidecarSourceName(platform, arch);
   const actualNodeName = NodePath.basename(nodeSidecarPath);
@@ -528,6 +553,7 @@ export const buildTauriArtifact = async (
     nodeSidecarPath,
     nodeSidecarDestinationName: resolveNodeSidecarDestination(platform),
     nodeLicensePath,
+    appUpdateManifestPath,
     productVersion: metadata.productVersion,
     environment,
     clerkScanPaths: scanPaths,
@@ -548,6 +574,12 @@ export const buildTauriArtifact = async (
   // Scan the actual staged output as well as inputs. A key accidentally emitted
   // by a host/server build must fail before tauri consumes the stage.
   await clerkCheck([stageRoot], {});
+
+  const payloadValidation = await (dependencies.validatePayload ?? validateTauriPayload)({
+    stageRoot,
+    platform,
+    nodeSidecarPath: stagedNodeSidecarPath,
+  });
 
   const configOverlayPath = NodePath.resolve(
     options.configOverlayPath ?? defaultOverlayPath(stageRoot),
@@ -613,6 +645,7 @@ export const buildTauriArtifact = async (
     configOverlayPath,
     configOverlay,
     payload,
+    ...(payloadValidation === undefined ? {} : { payloadValidation }),
     hooks: { build: dependencies.build !== undefined, smoke: smokeVariants },
   };
 };
@@ -641,23 +674,86 @@ const spawnCommand = (
     });
   });
 
-const createCliHooks = (rootDir: string, binaryPath: string | undefined) => {
+export const resolveTauriCliCwd = (rootDir: string): string =>
+  NodePath.join(rootDir, "apps/desktop");
+
+const TAURI_CLI_RUNNER =
+  "require(process.argv[1]).run(process.argv.slice(2), 'tauri').catch((error) => { console.error(error.message); process.exit(1) })";
+
+export const resolveTauriBuildArguments = (
+  tauriCli: string,
+  configOverlayPath: string,
+  debug: boolean,
+): ReadonlyArray<string> => [
+  "-e",
+  TAURI_CLI_RUNNER,
+  tauriCli,
+  "build",
+  ...(debug ? ["--debug"] : []),
+  "--config",
+  configOverlayPath,
+];
+
+const resolvePinnedNodeEnvironment = async (
+  rootDir: string,
+  environment: Readonly<Record<string, string>>,
+): Promise<Readonly<Record<string, string>>> => {
+  if (/^node(?:js)?(?:\.exe)?$/i.test(NodePath.basename(process.execPath))) return environment;
+  const shimDirectory = NodePath.join(rootDir, ".t3/tauri-node-shim");
+  const shimPath = NodePath.join(shimDirectory, process.platform === "win32" ? "node.exe" : "node");
+  await NodeFS.mkdir(shimDirectory, { recursive: true });
+  await NodeFS.rm(shimPath, { force: true });
+  await NodeFS.link(process.execPath, shimPath);
+  return {
+    ...environment,
+    PATH: `${shimDirectory}${NodePath.delimiter}${environment.PATH ?? process.env.PATH ?? ""}`,
+  };
+};
+
+const createCliHooks = (options: TauriArtifactCliOptions) => {
+  const { rootDir, binaryPath, platform, arch } = options;
   const vpCli = NodePath.join(rootDir, "node_modules/vite-plus/dist/bin.js");
-  const tauriCli = NodePath.join(rootDir, "apps/desktop/node_modules/@tauri-apps/cli/tauri.js");
+  const tauriCli = NodePath.join(rootDir, "apps/desktop/node_modules/@tauri-apps/cli/main.js");
   const prepare: TauriArtifactPrepareHook = async (context) => {
-    const options = { cwd: rootDir, environment: context.environment };
-    await spawnCommand(process.execPath, [vpCli, "run", "--filter", "t3", "build"], options);
+    const environment = await resolvePinnedNodeEnvironment(rootDir, context.environment);
+    const commandOptions = { cwd: rootDir, environment };
+    await spawnCommand(process.execPath, [vpCli, "run", "--filter", "t3", "build"], commandOptions);
     await spawnCommand(
       process.execPath,
       [vpCli, "run", "--filter", "@t3tools/desktop", "build:tauri-host"],
-      options,
+      commandOptions,
     );
+    await spawnCommand(process.execPath, [vpCli, "run", "build:resource-monitor"], commandOptions);
+    await buildTauriServerClosure({
+      rootDir,
+      outputRoot: options.serverClosurePath,
+      platform,
+      arch,
+      environment,
+    });
+    const acquisition = await acquireNodeSidecar({
+      config: loadNodeSidecarConfig(
+        NodePath.join(rootDir, "apps/desktop/src-tauri/node-sidecar.json"),
+      ),
+      platform: platform === "win" ? "win32" : platform === "mac" ? "darwin" : "linux",
+      arch,
+      destinationDir: NodePath.dirname(options.nodeSidecarPath),
+      isDev: false,
+      env: environment,
+    });
+    if (
+      NodePath.resolve(acquisition.path) !== NodePath.resolve(options.nodeSidecarPath) ||
+      acquisition.licensePath === undefined ||
+      NodePath.resolve(acquisition.licensePath) !== NodePath.resolve(options.nodeLicensePath)
+    ) {
+      throw new Error("Pinned Node acquisition did not produce the requested target paths.");
+    }
   };
   const build: TauriArtifactHook = async (context) => {
     await spawnCommand(
       process.execPath,
-      [tauriCli, "build", "--debug", "--config", context.configOverlayPath],
-      { cwd: rootDir, environment: context.environment },
+      resolveTauriBuildArguments(tauriCli, context.configOverlayPath, options.debug),
+      { cwd: resolveTauriCliCwd(rootDir), environment: context.environment },
     );
   };
   const smoke: TauriArtifactHook = async (context) => {
@@ -698,12 +794,14 @@ export interface TauriArtifactCliOptions {
   readonly nodeSidecarPath: string;
   readonly resourceMonitorPath: string;
   readonly nodeLicensePath: string;
+  readonly appUpdateManifestPath: string;
   readonly productVersion: string;
   readonly channel?: ProductVersionChannel;
   readonly date?: string;
   readonly run?: string;
   readonly configOverlayPath?: string;
   readonly binaryPath?: string;
+  readonly debug: boolean;
   readonly skipBuild: boolean;
   readonly skipSmoke: boolean;
 }
@@ -721,24 +819,27 @@ export const parseTauriArtifactArguments = (
     rootDir,
     platform: defaults.platform ?? resolveTauriArtifactPlatform(),
     arch: defaults.arch ?? resolveTauriArtifactArch(),
-    stageRoot: defaults.stageRoot ?? NodePath.join(rootDir, "apps/desktop/src-tauri/stage"),
-    frontendDist: defaults.frontendDist ?? NodePath.join(rootDir, "apps/server/dist/client"),
-    hostBundlePath:
-      defaults.hostBundlePath ?? NodePath.join(rootDir, "apps/desktop/dist-tauri-host/host.cjs"),
-    skipBuild: defaults.skipBuild ?? false,
-    skipSmoke: defaults.skipSmoke ?? false,
+    ...(defaults.stageRoot === undefined ? {} : { stageRoot: defaults.stageRoot }),
+    ...(defaults.frontendDist === undefined ? {} : { frontendDist: defaults.frontendDist }),
+    ...(defaults.hostBundlePath === undefined ? {} : { hostBundlePath: defaults.hostBundlePath }),
     ...(defaults.serverClosurePath === undefined
       ? {}
       : { serverClosurePath: defaults.serverClosurePath }),
     ...(defaults.nodeSidecarPath === undefined
       ? {}
       : { nodeSidecarPath: defaults.nodeSidecarPath }),
-    ...(defaults.resourceMonitorPath === undefined
-      ? {}
-      : { resourceMonitorPath: defaults.resourceMonitorPath }),
     ...(defaults.nodeLicensePath === undefined
       ? {}
       : { nodeLicensePath: defaults.nodeLicensePath }),
+    ...(defaults.resourceMonitorPath === undefined
+      ? {}
+      : { resourceMonitorPath: defaults.resourceMonitorPath }),
+    ...(defaults.appUpdateManifestPath === undefined
+      ? {}
+      : { appUpdateManifestPath: defaults.appUpdateManifestPath }),
+    debug: defaults.debug ?? false,
+    skipBuild: defaults.skipBuild ?? false,
+    skipSmoke: defaults.skipSmoke ?? false,
     ...(defaults.productVersion === undefined ? {} : { productVersion: defaults.productVersion }),
     ...(defaults.channel === undefined ? {} : { channel: defaults.channel }),
     ...(defaults.date === undefined ? {} : { date: defaults.date }),
@@ -751,7 +852,8 @@ export const parseTauriArtifactArguments = (
 
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
-    if (argument === "--skip-build") values.skipBuild = true;
+    if (argument === "--debug") values.debug = true;
+    else if (argument === "--skip-build") values.skipBuild = true;
     else if (argument === "--skip-smoke") values.skipSmoke = true;
     else if (argument === "--root") values.rootDir = readArgument(args, index++, argument);
     else if (argument === "--platform")
@@ -769,6 +871,8 @@ export const parseTauriArtifactArguments = (
       values.resourceMonitorPath = readArgument(args, index++, argument);
     else if (argument === "--node-license")
       values.nodeLicensePath = readArgument(args, index++, argument);
+    else if (argument === "--app-update")
+      values.appUpdateManifestPath = readArgument(args, index++, argument);
     else if (argument === "--product-version")
       values.productVersion = readArgument(args, index++, argument);
     else if (argument === "--channel") {
@@ -784,10 +888,41 @@ export const parseTauriArtifactArguments = (
     else throw new Error(`Unknown Tauri artifact option '${argument}'.`);
   }
 
+  const finalRoot = values.rootDir ?? rootDir;
+  const finalPlatform = values.platform ?? resolveTauriArtifactPlatform();
+  const finalArch = values.arch ?? resolveTauriArtifactArch();
+  values.stageRoot ??= NodePath.join(finalRoot, "apps/desktop/src-tauri/stage");
+  values.frontendDist ??= NodePath.join(finalRoot, "apps/server/dist/client");
+  values.hostBundlePath ??= NodePath.join(finalRoot, "apps/desktop/dist-tauri-host/host.cjs");
+  values.serverClosurePath ??= NodePath.join(
+    finalRoot,
+    ".t3/tauri-server-closure",
+    `${finalPlatform}-${finalArch}`,
+  );
+  values.nodeSidecarPath ??= NodePath.join(
+    finalRoot,
+    "apps/desktop/src-tauri/binaries",
+    resolveNodeSidecarSourceName(finalPlatform, finalArch),
+  );
+  values.nodeLicensePath ??= NodePath.join(
+    finalRoot,
+    "apps/desktop/src-tauri/binaries/NODE_LICENSE.txt",
+  );
+  values.resourceMonitorPath ??= NodePath.join(
+    finalRoot,
+    "native/resource-monitor/target/release",
+    finalPlatform === "win" ? "t3-resource-monitor.exe" : "t3-resource-monitor",
+  );
+  values.appUpdateManifestPath ??= NodePath.join(
+    finalRoot,
+    "apps/desktop/src-tauri/app-update.yml",
+  );
+
   const required = [
     ["--server", values.serverClosurePath],
     ["--node", values.nodeSidecarPath],
     ["--node-license", values.nodeLicensePath],
+    ["--app-update", values.appUpdateManifestPath],
     ["--resource-monitor", values.resourceMonitorPath],
     ["--product-version", values.productVersion],
   ] as const;
@@ -802,7 +937,7 @@ export const runTauriArtifactCli = async (
   args: ReadonlyArray<string> = process.argv.slice(2),
 ): Promise<BuildTauriArtifactResult> => {
   const parsed = parseTauriArtifactArguments(args);
-  const cliHooks = createCliHooks(parsed.rootDir, parsed.binaryPath);
+  const cliHooks = createCliHooks(parsed);
   return buildTauriArtifact({
     ...parsed,
     dependencies: {

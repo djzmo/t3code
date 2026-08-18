@@ -31,6 +31,11 @@ import {
   findInlinedExternalPackages,
   selectCliRuntimeExternalDependencies,
 } from "./lib/cli-external-packages.ts";
+import {
+  createStagePatchedDependencies,
+  createStageWorkspaceConfig,
+  resolveFffNativeDependencies,
+} from "./lib/desktop-stage-config.ts";
 import { loadRepoEnv } from "./lib/public-config.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
 
@@ -1056,31 +1061,7 @@ ${associatedDomains}
 `;
 }
 
-export function resolveFffNativeDependencies(
-  platform: typeof BuildPlatform.Type,
-  arch: typeof BuildArch.Type,
-  version: string,
-): Record<string, string> {
-  const architectures = arch === "universal" ? (["arm64", "x64"] as const) : [arch];
-
-  if (platform === "mac") {
-    return Object.fromEntries(
-      architectures.map((architecture) => [`@ff-labs/fff-bin-darwin-${architecture}`, version]),
-    );
-  }
-
-  if (platform === "win") {
-    return Object.fromEntries(
-      architectures.map((architecture) => [`@ff-labs/fff-bin-win32-${architecture}`, version]),
-    );
-  }
-
-  return Object.fromEntries(
-    architectures.flatMap((architecture) =>
-      ["gnu", "musl"].map((libc) => [`@ff-labs/fff-bin-linux-${architecture}-${libc}`, version]),
-    ),
-  );
-}
+export { createStagePatchedDependencies, createStageWorkspaceConfig, resolveFffNativeDependencies };
 
 export interface ClerkPasskeyNativeArtifact {
   readonly packageName: string;
@@ -1142,71 +1123,6 @@ const stageClerkPasskeyNativeBinaries = Effect.fn("stageClerkPasskeyNativeBinari
     yield* fs.copyFile(sourcePath, path.join(packageDir, artifact.binaryFileName));
   }
 });
-
-export function createStageWorkspaceConfig(input: {
-  readonly platform: typeof BuildPlatform.Type;
-  readonly arch: typeof BuildArch.Type;
-  readonly allowBuilds?: Record<string, boolean>;
-  readonly patchedDependencies?: Record<string, string>;
-  readonly overrides?: Record<string, string>;
-  // The Windows server sidecar stage runs both the Windows primary and the
-  // WSL Linux backend from one dependency tree, so it needs win32 + linux
-  // natives (e.g. @yuuang/ffi-rs-linux-x64-gnu) — and a hoisted (physical,
-  // symlink-free) node_modules: the tree gets packed into server.asar and
-  // later extracted for WSL, and neither step can rely on pnpm's
-  // symlink/junction layout surviving the trip.
-  readonly linuxServerBackend?: boolean;
-}): StageWorkspaceConfig {
-  const { platform, arch, allowBuilds, patchedDependencies, overrides, linuxServerBackend } = input;
-  const hostOs = platform === "mac" ? "darwin" : platform === "win" ? "win32" : "linux";
-  const hostCpu = arch === "universal" ? ["arm64", "x64"] : [arch];
-  // Linux AppImages execute a Linux/glibc Node process that loads
-  // Linux-native optional deps at runtime. Keep libc explicit so pnpm
-  // includes those optional packages in the staged production install.
-  const supportedArchitectures =
-    platform === "linux"
-      ? {
-          os: [hostOs],
-          cpu: hostCpu,
-          libc: ["glibc"],
-        }
-      : linuxServerBackend
-        ? {
-            os: Array.from(new Set([hostOs, "linux"])),
-            cpu: hostCpu,
-            libc: ["glibc"],
-          }
-        : {
-            os: [hostOs],
-            cpu: hostCpu,
-          };
-
-  return {
-    supportedArchitectures,
-    ...(allowBuilds && Object.keys(allowBuilds).length > 0 ? { allowBuilds } : {}),
-    ...(patchedDependencies && Object.keys(patchedDependencies).length > 0
-      ? { patchedDependencies }
-      : {}),
-    ...(overrides && Object.keys(overrides).length > 0 ? { overrides } : {}),
-    ...(linuxServerBackend ? { nodeLinker: "hoisted" as const } : {}),
-  };
-}
-
-export function createStagePatchedDependencies(
-  patchedDependencies: Record<string, string>,
-  dependencies: Record<string, unknown>,
-): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(patchedDependencies).filter(([patchKey]) =>
-      Object.hasOwn(dependencies, getPatchedDependencyPackageName(patchKey)),
-    ),
-  );
-}
-
-function getPatchedDependencyPackageName(patchKey: string): string {
-  const versionSeparator = patchKey.lastIndexOf("@");
-  return versionSeparator > 0 ? patchKey.slice(0, versionSeparator) : patchKey;
-}
 
 const AzureTrustedSigningOptionsConfig = Config.all({
   publisherName: Config.string("AZURE_TRUSTED_SIGNING_PUBLISHER_NAME"),
