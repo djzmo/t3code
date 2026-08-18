@@ -32,6 +32,7 @@ apps/desktop/dist-tauri-host/
 apps/mobile/.showcase/
 artifacts/app-store/screenshots/
 native/**/target/
+apps/desktop/src-tauri/target/
 node_modules/
 .alchemy/
 *.log
