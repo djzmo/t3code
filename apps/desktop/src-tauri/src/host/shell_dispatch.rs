@@ -270,7 +270,7 @@ impl<P: ShellPlatform> ShellDispatcher<P> {
                     // the operation one-shot even if a platform callback
                     // re-enters the dispatcher while cleanup is in progress.
                     self.broker_cleanup_applied = true;
-                    self.broker.transport_close();
+                    self.broker.transport_close().map_err(adapter_error)?;
                 }
                 let residue = self.feed_residue_terminated();
                 state = residue.state;
@@ -409,11 +409,12 @@ impl<P: ShellPlatform> ShellDispatcher<P> {
         events
     }
 
-    pub fn transport_close(&mut self) {
+    pub fn transport_close(&mut self) -> Result<(), RpcError> {
         if !self.broker_cleanup_applied {
             self.broker_cleanup_applied = true;
-            self.broker.transport_close();
+            self.broker.transport_close().map_err(adapter_error)?;
         }
+        Ok(())
     }
 }
 

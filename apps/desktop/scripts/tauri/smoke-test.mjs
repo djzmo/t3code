@@ -126,27 +126,22 @@ const runSmoke = async (options) => {
     );
   }
 
-  // The forced variant asks the host to exercise its abnormal-shutdown path;
-  // the shell remains responsible for draining registered descendants.
-  killCapturedProcess(child, options.killHost ? "SIGKILL" : "SIGTERM");
-  await Promise.race([exitedPromise, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+  // The app consumes the smoke environment only after backend readiness. The
+  // normal path asks the lifecycle to exit cleanly; the forced path kills only
+  // the retained host child and lets the shell prove managed-child cleanup.
+  await Promise.race([exitedPromise, new Promise((resolve) => setTimeout(resolve, 10_000))]);
   if (!exited) {
     killCapturedProcess(child, "SIGKILL");
     throw new Error(`Tauri smoke process did not exit after readiness (pid ${child.pid ?? "?"}).`);
   }
 
-  if (!options.killHost && exitCode !== 0 && exitSignal === null) {
+  if (!options.killHost && exitCode !== 0) {
     throw new Error(`Tauri smoke exited with code ${exitCode}.\n${output.join("")}`);
   }
 
   const fullOutput = output.join("");
-  if (
-    options.killHost &&
-    !/no[ ._-]+orphan|children[ ._-]+gone|host[ ._-]+killed/i.test(fullOutput)
-  ) {
-    process.stderr.write(
-      "Warning: forced-kill smoke exited, but no explicit no-orphans receipt was observed.\n",
-    );
+  if (options.killHost && !fullOutput.includes("AGENT_NANONI_SMOKE no-orphans: host-killed cleanup-complete")) {
+    throw new Error(`Forced-host smoke exited without a successful no-orphans receipt.\n${fullOutput}`);
   }
   process.stdout.write(
     `Tauri smoke passed (${options.killHost ? "forced-kill" : "normal"}); pid=${child.pid ?? "?"}.\n`,

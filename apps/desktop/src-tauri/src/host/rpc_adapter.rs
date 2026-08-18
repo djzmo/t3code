@@ -314,12 +314,17 @@ impl RpcProcessBroker {
         self.subscribe_events().try_next()
     }
 
-    pub fn transport_close(&mut self) {
-        let _ = self.broker.transport_close();
+    pub fn transport_close(&mut self) -> Result<(), RpcAdapterError> {
+        let cleanup_error = self
+            .broker
+            .transport_close()
+            .into_iter()
+            .find_map(|(_, result)| result.err());
         let mut state = lock_state(&self.state);
         state.attempts.clear();
         state.processes.clear();
         state.registrations.clear();
+        cleanup_error.map_or(Ok(()), |error| Err(error.into()))
     }
 
     fn process_record(
@@ -681,7 +686,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("consumer reached blocking receive");
 
-        adapter.transport_close();
+        let _ = adapter.transport_close();
         assert!(consumer.join().expect("consumer thread joins").is_none());
     }
 

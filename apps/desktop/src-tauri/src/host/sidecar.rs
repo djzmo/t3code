@@ -349,6 +349,27 @@ impl SidecarSupervisor {
             true,
         )
     }
+
+    /// Terminates the retained host child for the explicit packaged smoke path.
+    /// The reader observes the resulting EOF as an unexpected peer close, so
+    /// the normal lifecycle and managed-child cleanup path remains under test.
+    pub fn terminate_for_smoke(&self) -> Result<u32, SidecarError> {
+        if std::env::var_os("AGENT_NANONI_SMOKE").as_deref() != Some(std::ffi::OsStr::new("1"))
+            || std::env::var_os("AGENT_NANONI_SMOKE_KILL_HOST").as_deref()
+                != Some(std::ffi::OsStr::new("1"))
+        {
+            return Err(SidecarError::Peer(
+                "host termination is available only to the explicit smoke harness".to_owned(),
+            ));
+        }
+        let mut child = self.shared.child.lock().map_err(|_| SidecarError::Closed)?;
+        let child = child.as_mut().ok_or(SidecarError::Closed)?;
+        let pid = child.id();
+        child
+            .kill()
+            .map_err(|error| SidecarError::Io(error.to_string()))?;
+        Ok(pid)
+    }
 }
 
 impl Drop for SidecarSupervisor {

@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use agent_nanoni_desktop::app_events::{
-    AppEvent, AppTransition, NativeEvent, Platform as AppPlatform,
+    AppEvent, AppTransition, HostNotification, NativeEvent, Platform as AppPlatform,
 };
 use agent_nanoni_desktop::bridge::{
     DesktopEvent, HostInvokeContext, HostInvokeHandler, HostInvokeRequest, TauriDesktopEvents,
@@ -385,6 +385,7 @@ impl<R: tauri::Runtime> ShellPlatform for TauriShellPlatform<R> {
     }
 
     fn window_notification(&mut self, method: RpcMethod, params: RpcParams) -> Result<(), String> {
+        let is_window_show = method == RpcMethod::WindowShow;
         let result: Result<(), String> = match method {
             RpcMethod::WindowShow => stringify_error(self.window(&label_params(params)?)?.show()),
             RpcMethod::WindowHide => stringify_error(self.window(&label_params(params)?)?.hide()),
@@ -462,7 +463,28 @@ impl<R: tauri::Runtime> ShellPlatform for TauriShellPlatform<R> {
             }
             _ => return Err(format!("unsupported window notification: {method:?}")),
         };
-        result
+        result?;
+        if is_window_show
+            && env::var_os("AGENT_NANONI_SMOKE").as_deref() == Some(std::ffi::OsStr::new("1"))
+        {
+            eprintln!("AGENT_NANONI_SMOKE backend-ready");
+            if env::var_os("AGENT_NANONI_SMOKE_KILL_HOST").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+            {
+                let pid = self
+                    .runtime
+                    .sidecar()?
+                    .terminate_for_smoke()
+                    .map_err(|error| error.to_string())?;
+                eprintln!("AGENT_NANONI_SMOKE host-kill-requested pid={pid}");
+            } else {
+                eprintln!("AGENT_NANONI_SMOKE clean-exit-requested");
+                let _ = self
+                    .runtime
+                    .dispatch_app_event(AppEvent::Host(HostNotification::Exit { code: 0 }))?;
+            }
+        }
+        Ok(())
     }
 
     fn dialog_error(&mut self, params: DialogErrorParams) -> Result<(), String> {
@@ -987,8 +1009,16 @@ fn setup_sidecar<R: tauri::Runtime>(
         }),
         unexpected_close: Arc::new(move |reason| {
             if let Ok(mut dispatcher) = close_dispatcher.lock() {
-                if let Err(error) = dispatcher.dispatch_app_event(AppEvent::PeerClosed) {
+                let cleanup = dispatcher.dispatch_app_event(AppEvent::PeerClosed);
+                if let Err(error) = &cleanup {
                     eprintln!("native shell close handling failed: {}", error.message);
+                }
+                if cleanup.is_ok()
+                    && dispatcher.broker_cleanup_applied()
+                    && env::var_os("AGENT_NANONI_SMOKE_KILL_HOST").as_deref()
+                        == Some(std::ffi::OsStr::new("1"))
+                {
+                    eprintln!("AGENT_NANONI_SMOKE no-orphans: host-killed cleanup-complete");
                 }
             }
             close_runtime.clear_sidecar();
