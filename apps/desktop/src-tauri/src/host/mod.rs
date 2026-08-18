@@ -9,6 +9,7 @@
 mod broker;
 mod identity;
 pub mod rpc_adapter;
+pub mod shell_dispatch;
 pub mod sidecar;
 
 pub use broker::{
