@@ -234,9 +234,15 @@ const runWithDefaultSurface = async (
   const previousPath = process.env.PATH;
   const previousArchive = process.env.MOCK_NPM_TARBALL;
   const previousIntegrity = process.env.MOCK_NPM_INTEGRITY;
+  const previousTemp = process.env.TEMP;
+  const previousTmp = process.env.TMP;
+  const temporaryWithSpaces = NodePath.join(root, "npm temporary directory");
+  NodeFS.mkdirSync(temporaryWithSpaces, { recursive: true });
   process.env.PATH = `${shim}${NodePath.delimiter}${previousPath ?? ""}`;
   process.env.MOCK_NPM_TARBALL = archivePath;
   process.env.MOCK_NPM_INTEGRITY = expectedIntegrity;
+  process.env.TEMP = temporaryWithSpaces;
+  process.env.TMP = temporaryWithSpaces;
   try {
     return await verifyRemoteCliPin({
       rootDir: root,
@@ -251,6 +257,10 @@ const runWithDefaultSurface = async (
     else process.env.MOCK_NPM_TARBALL = previousArchive;
     if (previousIntegrity === undefined) delete process.env.MOCK_NPM_INTEGRITY;
     else process.env.MOCK_NPM_INTEGRITY = previousIntegrity;
+    if (previousTemp === undefined) delete process.env.TEMP;
+    else process.env.TEMP = previousTemp;
+    if (previousTmp === undefined) delete process.env.TMP;
+    else process.env.TMP = previousTmp;
   }
 };
 

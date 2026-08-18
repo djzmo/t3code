@@ -1168,23 +1168,42 @@ const findDistIntegrity = (metadata: unknown): string | undefined => {
 const defaultExecutableSurface = async (input: ExecutableSurfaceInput): Promise<void> => {
   const temporary = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "remote-cli-pin-pack-"));
   try {
-    const output = NodeChildProcess.execFileSync(
-      process.platform === "win32" ? "npm.cmd" : "npm",
-      [
-        "pack",
-        `${input.packageName}@${input.packageVersion}`,
-        "--ignore-scripts",
-        "--json",
-        "--pack-destination",
-        temporary,
-      ],
-      {
-        cwd: input.rootDir,
-        encoding: "utf8",
-        shell: process.platform === "win32",
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
+    const packageSpec = `${input.packageName}@${input.packageVersion}`;
+    const packArguments = [
+      "pack",
+      packageSpec,
+      "--ignore-scripts",
+      "--json",
+      "--pack-destination",
+      temporary,
+    ];
+    let executable = "npm";
+    let executableArguments = packArguments;
+    let environment = process.env;
+    if (process.platform === "win32") {
+      const wrapper = NodePath.join(temporary, "run-npm-pack.cmd");
+      NodeFS.writeFileSync(
+        wrapper,
+        [
+          "@echo off",
+          'npm pack "%AGENT_NANONI_NPM_PACKAGE_SPEC%" --ignore-scripts --json --pack-destination "%AGENT_NANONI_NPM_PACK_DESTINATION%"',
+          "",
+        ].join("\r\n"),
+      );
+      executable = process.env.ComSpec ?? "cmd.exe";
+      executableArguments = ["/d", "/s", "/c", "call", wrapper];
+      environment = {
+        ...process.env,
+        AGENT_NANONI_NPM_PACKAGE_SPEC: packageSpec,
+        AGENT_NANONI_NPM_PACK_DESTINATION: temporary,
+      };
+    }
+    const output = NodeChildProcess.execFileSync(executable, executableArguments, {
+      cwd: input.rootDir,
+      encoding: "utf8",
+      env: environment,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     const metadata = JSON.parse(output) as unknown;
     const integrity = asRecord(Array.isArray(metadata) ? metadata[0] : metadata).integrity;
     if (integrity !== input.expectedIntegrity) {
