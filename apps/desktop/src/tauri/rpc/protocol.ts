@@ -103,7 +103,22 @@ export const APPENDIX_B_METHODS = [
   "power.event",
 ] as const;
 
-export const RpcMethodName = Schema.Literals(APPENDIX_B_METHODS);
+/**
+ * Internal Phase 0 containment amendment. These methods keep child creation
+ * inside the native shell; Appendix B remains frozen and fixture-complete.
+ */
+export const PROCESS_BROKER_METHODS = [
+  "process.spawn",
+  "process.input",
+  "process.kill",
+  "process.release",
+  "process.output",
+  "process.exit",
+] as const;
+
+export const RPC_METHODS = [...APPENDIX_B_METHODS, ...PROCESS_BROKER_METHODS] as const;
+
+export const RpcMethodName = Schema.Literals(RPC_METHODS);
 export type RpcMethodName = typeof RpcMethodName.Type;
 
 export const RpcDirection = Schema.Literals(["host-to-shell", "shell-to-host"]);
@@ -186,6 +201,20 @@ export const APPENDIX_B_METHOD_SPECS = {
   "updater.progress": { direction: "shell-to-host", kind: "notification" },
   "power.snapshot": { direction: "host-to-shell", kind: "request" },
   "power.event": { direction: "shell-to-host", kind: "notification" },
+} satisfies Record<(typeof APPENDIX_B_METHODS)[number], RpcMethodSpec>;
+
+export const PROCESS_BROKER_METHOD_SPECS = {
+  "process.spawn": { direction: "host-to-shell", kind: "request" },
+  "process.input": { direction: "host-to-shell", kind: "notification" },
+  "process.kill": { direction: "host-to-shell", kind: "notification" },
+  "process.release": { direction: "host-to-shell", kind: "notification" },
+  "process.output": { direction: "shell-to-host", kind: "notification" },
+  "process.exit": { direction: "shell-to-host", kind: "notification" },
+} satisfies Record<(typeof PROCESS_BROKER_METHODS)[number], RpcMethodSpec>;
+
+export const RPC_METHOD_SPECS = {
+  ...APPENDIX_B_METHOD_SPECS,
+  ...PROCESS_BROKER_METHOD_SPECS,
 } satisfies Record<RpcMethodName, RpcMethodSpec>;
 
 export const RpcId = Schema.Int;
@@ -261,6 +290,50 @@ const ProcessRegisterParams = Schema.Struct({
 });
 const ProcessUnregisterParams = Schema.Struct({ registrationId: Schema.NonEmptyString });
 const ProcessCancelParams = Schema.Struct({ attemptId: Schema.NonEmptyString });
+
+const ProcessFd = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+const ProcessSpawnParams = Schema.Struct({
+  attemptId: Schema.NonEmptyString,
+  kind: Schema.Literals(["server", "ssh", "wsl", "other"]),
+  command: Schema.NonEmptyString,
+  args: StringArray,
+  cwd: Schema.optional(Schema.NonEmptyString),
+  env: Schema.Record(Schema.String, Schema.String),
+  extendEnv: Schema.Boolean,
+  stdin: Schema.Literals(["pipe", "null"]),
+  stdout: Schema.Literals(["pipe", "null"]),
+  stderr: Schema.Literals(["pipe", "null"]),
+  additionalFds: Schema.Array(
+    Schema.Struct({ fd: ProcessFd, direction: Schema.Literals(["input", "output"]) }),
+  ),
+});
+const ProcessTokenParams = Schema.Struct({
+  processId: Schema.NonEmptyString,
+  registrationId: Schema.NonEmptyString,
+});
+const ProcessInputParams = Schema.Struct({
+  processId: Schema.NonEmptyString,
+  registrationId: Schema.NonEmptyString,
+  fd: ProcessFd,
+  bytesBase64: Schema.String,
+});
+const ProcessKillParams = Schema.Struct({
+  processId: Schema.NonEmptyString,
+  registrationId: Schema.NonEmptyString,
+  signal: Schema.String,
+  forceKillAfterMs: NonNegativeInt,
+});
+const ProcessOutputParams = Schema.Struct({
+  processId: Schema.NonEmptyString,
+  fd: ProcessFd,
+  sequence: NonNegativeInt,
+  bytesBase64: Schema.String,
+});
+const ProcessExitParams = Schema.Struct({
+  processId: Schema.NonEmptyString,
+  code: Schema.Union([Schema.Int, Schema.Null]),
+  signal: Schema.optional(Schema.String),
+});
 
 const IpcInvokeParams = Schema.Struct({ channel: Schema.NonEmptyString, payload: Schema.Unknown });
 const IpcPushParams = IpcInvokeParams;
@@ -462,6 +535,12 @@ export const RpcMethodParams = {
   "process.register": ProcessRegisterParams,
   "process.unregister": ProcessUnregisterParams,
   "process.cancel": ProcessCancelParams,
+  "process.spawn": ProcessSpawnParams,
+  "process.input": ProcessInputParams,
+  "process.kill": ProcessKillParams,
+  "process.release": ProcessTokenParams,
+  "process.output": ProcessOutputParams,
+  "process.exit": ProcessExitParams,
   "ipc.invoke": IpcInvokeParams,
   "ipc.push": IpcPushParams,
   "window.create": WindowCreateParams,
@@ -531,6 +610,16 @@ export const RpcMethodResults = {
   "process.register": Schema.Struct({ registrationId: Schema.Union([Schema.String, Schema.Null]) }),
   "process.unregister": EmptyResult,
   "process.cancel": EmptyResult,
+  "process.spawn": Schema.Struct({
+    processId: Schema.NonEmptyString,
+    pid: NonNegativeInt,
+    registrationId: Schema.Union([Schema.NonEmptyString, Schema.Null]),
+  }),
+  "process.input": EmptyResult,
+  "process.kill": EmptyResult,
+  "process.release": EmptyResult,
+  "process.output": EmptyResult,
+  "process.exit": EmptyResult,
   "ipc.invoke": Schema.Struct({ result: Schema.Unknown }),
   "ipc.push": EmptyResult,
   "window.create": Schema.Struct({ label: Schema.NonEmptyString }),
@@ -635,11 +724,9 @@ const makeNotificationSchema = (method: RpcMethodName) =>
     ),
   );
 
-const requestMethods = APPENDIX_B_METHODS.filter(
-  (method) => APPENDIX_B_METHOD_SPECS[method].kind === "request",
-);
-const notificationMethods = APPENDIX_B_METHODS.filter(
-  (method) => APPENDIX_B_METHOD_SPECS[method].kind === "notification",
+const requestMethods = RPC_METHODS.filter((method) => RPC_METHOD_SPECS[method].kind === "request");
+const notificationMethods = RPC_METHODS.filter(
+  (method) => RPC_METHOD_SPECS[method].kind === "notification",
 );
 const requestVariants = requestMethods.map(makeRequestSchema);
 const notificationVariants = notificationMethods.map(makeNotificationSchema);

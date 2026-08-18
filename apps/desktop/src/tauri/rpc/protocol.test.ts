@@ -10,6 +10,8 @@ import {
   MAX_NESTING_DEPTH,
   MAX_PENDING_REQUESTS,
   PRE_READY_RENDERER_QUEUE_LIMIT,
+  PROCESS_BROKER_METHODS,
+  RPC_METHOD_SPECS,
   RpcEnvelope,
   RpcMethodName,
   RpcResponse,
@@ -23,6 +25,74 @@ import {
 const document = decodeFixtureDocument(fixtureDocument);
 
 describe("Tauri shell/host RPC contract", () => {
+  it("validates the native process-broker containment amendment", () => {
+    const envelopes = [
+      {
+        jsonrpc: "2.0",
+        id: 900,
+        method: "process.spawn",
+        params: {
+          attemptId: "attempt-1",
+          kind: "server",
+          command: "node",
+          args: ["server.cjs"],
+          env: {},
+          extendEnv: true,
+          stdin: "pipe",
+          stdout: "pipe",
+          stderr: "pipe",
+          additionalFds: [{ fd: 3, direction: "output" }],
+        },
+      },
+      {
+        jsonrpc: "2.0",
+        method: "process.input",
+        params: {
+          processId: "process-1",
+          registrationId: "registration-1",
+          fd: 0,
+          bytesBase64: "aGVsbG8=",
+        },
+      },
+      {
+        jsonrpc: "2.0",
+        method: "process.kill",
+        params: {
+          processId: "process-1",
+          registrationId: "registration-1",
+          signal: "SIGTERM",
+          forceKillAfterMs: 5_000,
+        },
+      },
+      {
+        jsonrpc: "2.0",
+        method: "process.release",
+        params: { processId: "process-1", registrationId: "registration-1" },
+      },
+      {
+        jsonrpc: "2.0",
+        method: "process.output",
+        params: { processId: "process-1", fd: 1, sequence: 0, bytesBase64: "b2s=" },
+      },
+      {
+        jsonrpc: "2.0",
+        method: "process.exit",
+        params: { processId: "process-1", code: 0 },
+      },
+    ] as const;
+
+    assert.equal(envelopes.length, PROCESS_BROKER_METHODS.length);
+    for (const envelope of envelopes) decodeEnvelope(envelope);
+
+    assert.throws(() =>
+      decodeEnvelope({
+        jsonrpc: "2.0",
+        method: "process.spawn",
+        params: envelopes[0].params,
+      }),
+    );
+  });
+
   it("decodes every Appendix B fixture and covers every method exactly once", () => {
     const fixtureMethods = new Set(
       document.fixtures.flatMap((fixture) =>
@@ -51,7 +121,7 @@ describe("Tauri shell/host RPC contract", () => {
         continue;
       }
 
-      const spec = APPENDIX_B_METHOD_SPECS[fixture.envelope.method];
+      const spec = RPC_METHOD_SPECS[fixture.envelope.method];
       assert.equal(fixture.direction, spec.direction, fixture.name);
       assert.equal(fixture.kind, spec.kind, fixture.name);
       assert.equal("id" in fixture.envelope, spec.kind === "request", fixture.name);
@@ -69,7 +139,7 @@ describe("Tauri shell/host RPC contract", () => {
       assert.isTrue("result" in response, fixture.name);
       if (!("result" in response)) continue;
       assert.equal(fixture.kind, "response", fixture.name);
-      const requestSpec = APPENDIX_B_METHOD_SPECS[fixture.method];
+      const requestSpec = RPC_METHOD_SPECS[fixture.method];
       assert.equal(
         fixture.direction,
         requestSpec.direction === "host-to-shell" ? "shell-to-host" : "host-to-shell",

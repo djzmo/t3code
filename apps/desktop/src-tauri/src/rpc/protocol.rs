@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 
 /// The canonical fixture is owned by the host contract and consumed by both
@@ -130,6 +130,18 @@ pub enum RpcMethod {
     ProcessUnregister,
     #[serde(rename = "process.cancel")]
     ProcessCancel,
+    #[serde(rename = "process.spawn")]
+    ProcessSpawn,
+    #[serde(rename = "process.input")]
+    ProcessInput,
+    #[serde(rename = "process.kill")]
+    ProcessKill,
+    #[serde(rename = "process.release")]
+    ProcessRelease,
+    #[serde(rename = "process.output")]
+    ProcessOutput,
+    #[serde(rename = "process.exit")]
+    ProcessExit,
     #[serde(rename = "ipc.invoke")]
     IpcInvoke,
     #[serde(rename = "ipc.push")]
@@ -320,6 +332,9 @@ impl RpcMethod {
             Self::AppShutdownComplete => (H, N),
             Self::ProcessRegister => (H, Q),
             Self::ProcessUnregister | Self::ProcessCancel => (H, N),
+            Self::ProcessSpawn => (H, Q),
+            Self::ProcessInput | Self::ProcessKill | Self::ProcessRelease => (H, N),
+            Self::ProcessOutput | Self::ProcessExit => (S, N),
             Self::IpcInvoke => (S, Q),
             Self::IpcPush => (H, N),
             Self::WindowCreate => (H, Q),
@@ -479,6 +494,96 @@ pub struct ProcessUnregisterParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProcessCancelParams {
     pub attempt_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProcessStreamMode {
+    Pipe,
+    Null,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProcessFdDirection {
+    Input,
+    Output,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessAdditionalFd {
+    pub fd: u32,
+    pub direction: ProcessFdDirection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessSpawnParams {
+    pub attempt_id: String,
+    pub kind: ProcessKind,
+    pub command: String,
+    pub args: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cwd: Option<String>,
+    pub env: BTreeMap<String, String>,
+    pub extend_env: bool,
+    pub stdin: ProcessStreamMode,
+    pub stdout: ProcessStreamMode,
+    pub stderr: ProcessStreamMode,
+    pub additional_fds: Vec<ProcessAdditionalFd>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessTokenParams {
+    pub process_id: String,
+    pub registration_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessInputParams {
+    pub process_id: String,
+    pub registration_id: String,
+    pub fd: u32,
+    pub bytes_base64: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessKillParams {
+    pub process_id: String,
+    pub registration_id: String,
+    pub signal: String,
+    pub force_kill_after_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessOutputParams {
+    pub process_id: String,
+    pub fd: u32,
+    pub sequence: u64,
+    pub bytes_base64: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessExitParams {
+    pub process_id: String,
+    #[serde(deserialize_with = "RequiredNullable::deserialize")]
+    pub code: RequiredNullable<i64>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub signal: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -936,6 +1041,12 @@ pub enum RpcParams {
     ProcessRegister(ProcessRegisterParams),
     ProcessUnregister(ProcessUnregisterParams),
     ProcessCancel(ProcessCancelParams),
+    ProcessSpawn(ProcessSpawnParams),
+    ProcessInput(ProcessInputParams),
+    ProcessKill(ProcessKillParams),
+    ProcessRelease(ProcessTokenParams),
+    ProcessOutput(ProcessOutputParams),
+    ProcessExit(ProcessExitParams),
     IpcInvoke(IpcInvokeParams),
     IpcPush(IpcPushParams),
     WindowLabel(WindowLabelParams),
@@ -1022,6 +1133,15 @@ pub struct PreventedResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RegistrationResult {
+    #[serde(deserialize_with = "RequiredNullable::deserialize")]
+    pub registration_id: RequiredNullableString,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessSpawnResult {
+    pub process_id: String,
+    pub pid: u64,
     #[serde(deserialize_with = "RequiredNullable::deserialize")]
     pub registration_id: RequiredNullableString,
 }
@@ -1162,6 +1282,7 @@ pub enum RpcResult {
     Metrics(Vec<ProcessMetric>),
     Prevented(PreventedResult),
     Registration(RegistrationResult),
+    ProcessSpawn(ProcessSpawnResult),
     IpcInvoke(IpcInvokeResult),
     WindowCreated(WindowCreatedResult),
     WindowBounds(WindowBoundsResult),
@@ -1872,6 +1993,11 @@ fn non_empty_param_fields(method: RpcMethod) -> &'static [&'static str] {
         RpcMethod::ProcessRegister => &["attemptId"],
         RpcMethod::ProcessUnregister => &["registrationId"],
         RpcMethod::ProcessCancel => &["attemptId"],
+        RpcMethod::ProcessSpawn => &["attemptId", "command"],
+        RpcMethod::ProcessInput | RpcMethod::ProcessKill | RpcMethod::ProcessRelease => {
+            &["processId", "registrationId"]
+        }
+        RpcMethod::ProcessOutput | RpcMethod::ProcessExit => &["processId"],
         RpcMethod::IpcInvoke | RpcMethod::IpcPush => &["channel"],
         RpcMethod::WindowCreate
         | RpcMethod::WindowShow
@@ -1972,6 +2098,24 @@ fn validate_params(
         }
         RpcMethod::ProcessCancel => {
             serde_json::from_value::<ProcessCancelParams>(value).map(|_| EmptyParams {})
+        }
+        RpcMethod::ProcessSpawn => {
+            serde_json::from_value::<ProcessSpawnParams>(value).map(|_| EmptyParams {})
+        }
+        RpcMethod::ProcessInput => {
+            serde_json::from_value::<ProcessInputParams>(value).map(|_| EmptyParams {})
+        }
+        RpcMethod::ProcessKill => {
+            serde_json::from_value::<ProcessKillParams>(value).map(|_| EmptyParams {})
+        }
+        RpcMethod::ProcessRelease => {
+            serde_json::from_value::<ProcessTokenParams>(value).map(|_| EmptyParams {})
+        }
+        RpcMethod::ProcessOutput => {
+            serde_json::from_value::<ProcessOutputParams>(value).map(|_| EmptyParams {})
+        }
+        RpcMethod::ProcessExit => {
+            serde_json::from_value::<ProcessExitParams>(value).map(|_| EmptyParams {})
         }
         RpcMethod::IpcInvoke => {
             serde_json::from_value::<IpcInvokeParams>(value).map(|_| EmptyParams {})
@@ -2124,6 +2268,11 @@ fn validate_result(
         | RpcMethod::AppShutdownComplete
         | RpcMethod::ProcessUnregister
         | RpcMethod::ProcessCancel
+        | RpcMethod::ProcessInput
+        | RpcMethod::ProcessKill
+        | RpcMethod::ProcessRelease
+        | RpcMethod::ProcessOutput
+        | RpcMethod::ProcessExit
         | RpcMethod::IpcPush
         | RpcMethod::WindowShow
         | RpcMethod::WindowHide
@@ -2164,6 +2313,7 @@ fn validate_result(
         RpcMethod::AppGetMetrics => decode!(Vec<ProcessMetric>),
         RpcMethod::AppBeforeQuit => decode!(PreventedResult),
         RpcMethod::ProcessRegister => decode!(RegistrationResult),
+        RpcMethod::ProcessSpawn => decode!(ProcessSpawnResult),
         RpcMethod::IpcInvoke => decode!(IpcInvokeResult),
         RpcMethod::WindowCreate => decode!(WindowCreatedResult),
         RpcMethod::WindowGetBounds => decode!(WindowBoundsResult),
@@ -2192,6 +2342,28 @@ fn invalid_fixture(fixture: &str, reason: &str) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_broker_amendment_is_method_and_kind_strict() -> Result<(), ProtocolError> {
+        for envelope in [
+            r#"{"jsonrpc":"2.0","id":900,"method":"process.spawn","params":{"attemptId":"attempt-1","kind":"server","command":"node","args":["server.cjs"],"env":{},"extendEnv":true,"stdin":"pipe","stdout":"pipe","stderr":"pipe","additionalFds":[{"fd":3,"direction":"output"}]}}"#,
+            r#"{"jsonrpc":"2.0","method":"process.input","params":{"processId":"process-1","registrationId":"registration-1","fd":0,"bytesBase64":"aGVsbG8="}}"#,
+            r#"{"jsonrpc":"2.0","method":"process.kill","params":{"processId":"process-1","registrationId":"registration-1","signal":"SIGTERM","forceKillAfterMs":5000}}"#,
+            r#"{"jsonrpc":"2.0","method":"process.release","params":{"processId":"process-1","registrationId":"registration-1"}}"#,
+            r#"{"jsonrpc":"2.0","method":"process.output","params":{"processId":"process-1","fd":1,"sequence":0,"bytesBase64":"b2s="}}"#,
+            r#"{"jsonrpc":"2.0","method":"process.exit","params":{"processId":"process-1","code":0}}"#,
+        ] {
+            assert!(decode_envelope(envelope).is_ok(), "{envelope}");
+        }
+
+        assert!(
+            decode_envelope(
+                r#"{"jsonrpc":"2.0","method":"process.spawn","params":{"attemptId":"attempt-1","kind":"server","command":"node","args":[],"env":{},"extendEnv":true,"stdin":"pipe","stdout":"pipe","stderr":"pipe","additionalFds":[]}}"#,
+            )
+            .is_err()
+        );
+        Ok(())
+    }
 
     #[test]
     fn canonical_fixture_decodes_and_validates() -> Result<(), ProtocolError> {
