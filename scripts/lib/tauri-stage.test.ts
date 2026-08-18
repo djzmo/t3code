@@ -13,6 +13,8 @@ const makeFixture = async () => {
   const server = NodePath.join(root, "server-closure");
   const host = NodePath.join(root, "host.cjs");
   const monitor = NodePath.join(root, "t3-resource-monitor");
+  const node = NodePath.join(root, "agent-nanoni-node-linux-x64");
+  const nodeLicense = NodePath.join(root, "LICENSE");
   const licenses = NodePath.join(root, "licenses");
   const update = NodePath.join(root, "app-update.yml");
   const web = NodePath.join(root, "web");
@@ -29,11 +31,13 @@ const makeFixture = async () => {
   );
   await NodeFS.writeFile(host, "#!/usr/bin/env node\n");
   await NodeFS.writeFile(monitor, "monitor\n");
+  await NodeFS.writeFile(node, "node\n");
+  await NodeFS.writeFile(nodeLicense, "Node runtime license\n");
   await NodeFS.writeFile(NodePath.join(licenses, "node.txt"), "Node license\n");
   await NodeFS.writeFile(update, "provider: latest\n");
   await NodeFS.writeFile(NodePath.join(web, "index.html"), "<!doctype html>\n");
 
-  return { root, server, host, monitor, licenses, update, web, stage };
+  return { root, server, host, monitor, node, nodeLicense, licenses, update, web, stage };
 };
 
 const removeFixture = async (root: string) => {
@@ -52,6 +56,9 @@ describe("tauri resource staging", () => {
         serverClosurePath: fixture.server,
         hostBundlePath: fixture.host,
         resourceMonitorPath: fixture.monitor,
+        nodeSidecarPath: fixture.node,
+        nodeSidecarDestinationName: "agent-nanoni-node",
+        nodeLicensePath: fixture.nodeLicense,
         licensesPath: fixture.licenses,
         appUpdateManifestPath: fixture.update,
         clerkScanPaths: [fixture.web],
@@ -79,6 +86,15 @@ describe("tauri resource staging", () => {
         ),
         "monitor\n",
       );
+      assert.equal(
+        await NodeFS.readFile(NodePath.join(fixture.stage, "agent-nanoni-node"), "utf8"),
+        "node\n",
+      );
+      assert.equal(
+        await NodeFS.readFile(NodePath.join(fixture.stage, "licenses/NODE_LICENSE.txt"), "utf8"),
+        "Node runtime license\n",
+      );
+      assert.equal(result.paths.nodeSidecar, NodePath.join(fixture.stage, "agent-nanoni-node"));
       assert.equal(
         await NodeFS.readFile(NodePath.join(fixture.stage, "licenses/node.txt"), "utf8"),
         "Node license\n",

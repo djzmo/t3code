@@ -27,6 +27,8 @@ squashfs-root/
 .gstack/
 dist-electron/
 apps/desktop/dist-tauri-host/
+apps/desktop/src-tauri/binaries/
+apps/desktop/src-tauri/stage/
 .electron-runtime/
 .showcase/
 apps/mobile/.showcase/

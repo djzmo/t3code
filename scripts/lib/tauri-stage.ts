@@ -11,10 +11,11 @@ export const CLERK_ENVIRONMENT_KEYS = [
   "VITE_CLERK_PUBLISHABLE_KEY",
 ] as const;
 
-/** The two paths consumed by a packaged Tauri host. */
+/** Resource layout consumed by the packaged Tauri shell and Node host. */
 export const TAURI_STAGE_LAYOUT = {
   server: "server",
   host: "host/host.cjs",
+  nodeSidecar: "agent-nanoni-node",
   resourceMonitor: "resource-monitor",
   licenses: "licenses",
   updateManifest: "app-update.yml",
@@ -58,6 +59,11 @@ export interface TauriStageSources {
   readonly serverRootPath?: string;
   readonly hostBundlePath: string;
   readonly resourceMonitorPath: string;
+  /** Pinned Node executable acquired for the target tuple. */
+  readonly nodeSidecarPath?: string;
+  /** Root resource name, normally agent-nanoni-node(.exe). */
+  readonly nodeSidecarDestinationName?: string;
+  readonly nodeLicensePath?: string;
   readonly licensesPath?: string;
   readonly appUpdateManifestPath?: string;
   /** One or more built web roots to inspect for Clerk publishable keys. */
@@ -92,6 +98,7 @@ export interface TauriStageResult {
     readonly serverRoot: string;
     readonly hostBundle: string;
     readonly resourceMonitor: string;
+    readonly nodeSidecar?: string;
     readonly licenses: string;
     readonly appUpdateManifest: string;
   };
@@ -294,6 +301,14 @@ export const resolveStageProductVersion = async (options: {
 
 const stagePath = (root: string, relative: string): string => NodePath.join(root, relative);
 
+const safeStageFileName = (value: string | undefined, fallback: string): string => {
+  const name = (value ?? fallback).trim();
+  if (!name || name === "." || name === ".." || NodePath.basename(name) !== name) {
+    throw new TauriStageError("invalid-source", `Unsafe staged resource name '${name}'.`);
+  }
+  return name;
+};
+
 const randomSuffix = (): string =>
   `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
@@ -320,6 +335,15 @@ export const stageTauriResources = async (
     options.resourceMonitorPath,
     "resourceMonitorPath",
   );
+  const nodeSidecar = options.nodeSidecarPath
+    ? await resolveExistingSource(fs, options.nodeSidecarPath, "nodeSidecarPath")
+    : undefined;
+  const nodeSidecarDestinationName = nodeSidecar
+    ? safeStageFileName(options.nodeSidecarDestinationName, NodePath.basename(nodeSidecar))
+    : undefined;
+  const nodeLicense = options.nodeLicensePath
+    ? await resolveExistingSource(fs, options.nodeLicensePath, "nodeLicensePath")
+    : undefined;
   const licenses = options.licensesPath
     ? await resolveExistingSource(fs, options.licensesPath, "licensesPath")
     : undefined;
@@ -350,6 +374,15 @@ export const stageTauriResources = async (
       sourceServer,
       stagePath(tempRoot, TAURI_STAGE_LAYOUT.server),
     );
+    if (nodeSidecar && nodeSidecarDestinationName) {
+      await copyTree(
+        fs,
+        nodeSidecar,
+        stagePath(tempRoot, nodeSidecarDestinationName),
+        nodeSidecar,
+        stagePath(tempRoot, nodeSidecarDestinationName),
+      );
+    }
     await copyTree(
       fs,
       hostBundle,
@@ -377,6 +410,15 @@ export const stageTauriResources = async (
         stagePath(tempRoot, TAURI_STAGE_LAYOUT.licenses),
         licenses,
         stagePath(tempRoot, TAURI_STAGE_LAYOUT.licenses),
+      );
+    }
+    if (nodeLicense) {
+      await copyTree(
+        fs,
+        nodeLicense,
+        stagePath(tempRoot, NodePath.join(TAURI_STAGE_LAYOUT.licenses, "NODE_LICENSE.txt")),
+        nodeLicense,
+        stagePath(tempRoot, NodePath.join(TAURI_STAGE_LAYOUT.licenses, "NODE_LICENSE.txt")),
       );
     }
     if (updateManifest) {
@@ -429,6 +471,9 @@ export const stageTauriResources = async (
         stageRoot,
         NodePath.join(TAURI_STAGE_LAYOUT.resourceMonitor, NodePath.basename(resourceMonitor)),
       ),
+      ...(nodeSidecarDestinationName === undefined
+        ? {}
+        : { nodeSidecar: stagePath(stageRoot, nodeSidecarDestinationName) }),
       licenses: stagePath(stageRoot, TAURI_STAGE_LAYOUT.licenses),
       appUpdateManifest: stagePath(stageRoot, TAURI_STAGE_LAYOUT.updateManifest),
     },

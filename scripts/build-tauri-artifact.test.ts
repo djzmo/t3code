@@ -1,0 +1,255 @@
+// @effect-diagnostics nodeBuiltinImport:off
+
+import * as NodeFS from "node:fs/promises";
+import * as NodePath from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+
+import {
+  TauriArtifactError,
+  buildTauriArtifact,
+  createTauriConfigOverlay,
+  parseTauriArtifactArguments,
+  resolveNodeSidecarDestination,
+  resolveNodeSidecarSourceName,
+} from "./build-tauri-artifact.ts";
+
+const temporaryRoots: string[] = [];
+
+const metadata = {
+  productVersion: "1.2.3",
+  compatibleServerVersion: "0.0.34",
+  upstreamBaseTag: "v0.0.34",
+  packageSpec: "t3@0.0.34",
+  channel: "stable" as const,
+};
+
+const makeFixture = async () => {
+  const root = await NodeFS.mkdtemp(NodePath.join(process.cwd(), ".tauri-artifact-test-"));
+  temporaryRoots.push(root);
+  const server = NodePath.join(root, "server");
+  const frontend = NodePath.join(root, "frontend");
+  const host = NodePath.join(root, "host.cjs");
+  const monitor = NodePath.join(root, "t3-resource-monitor");
+  const node = NodePath.join(root, "agent-nanoni-node-linux-x64");
+  const nodeLicense = NodePath.join(root, "NODE_LICENSE.txt");
+  const stage = NodePath.join(root, "stage");
+  const overlay = NodePath.join(root, "overlay.json");
+
+  await NodeFS.mkdir(NodePath.join(server, "apps/server/dist"), { recursive: true });
+  await NodeFS.mkdir(frontend, { recursive: true });
+  await NodeFS.writeFile(NodePath.join(server, "apps/server/dist/bin.mjs"), "export {}\n");
+  await NodeFS.writeFile(NodePath.join(frontend, "index.html"), "<!doctype html>\n");
+  await NodeFS.writeFile(host, "#!/usr/bin/env node\n");
+  await NodeFS.writeFile(monitor, "monitor\n");
+  await NodeFS.writeFile(node, "node\n");
+  await NodeFS.writeFile(nodeLicense, "Node license\n");
+
+  return { root, server, frontend, host, monitor, node, nodeLicense, stage, overlay };
+};
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryRoots.splice(0).map((root) => NodeFS.rm(root, { recursive: true, force: true })),
+  );
+});
+
+describe("Tauri artifact orchestration", () => {
+  it("stages and maps the triple-suffixed Node sidecar, writes the overlay, and runs both smokes", async () => {
+    const fixture = await makeFixture();
+    const builds: unknown[] = [];
+    const smokes: Array<{
+      variant: string | undefined;
+      environment: Readonly<Record<string, string>>;
+    }> = [];
+
+    const result = await buildTauriArtifact({
+      platform: "linux",
+      arch: "x64",
+      stageRoot: fixture.stage,
+      frontendDist: fixture.frontend,
+      serverClosurePath: fixture.server,
+      hostBundlePath: fixture.host,
+      nodeSidecarPath: fixture.node,
+      nodeLicensePath: fixture.nodeLicense,
+      resourceMonitorPath: fixture.monitor,
+      productVersion: metadata.productVersion,
+      configOverlayPath: fixture.overlay,
+      environment: {
+        NANONI_PRODUCT_VERSION: "stale",
+        NANONI_NIGHTLY_DATE: "stale",
+        VITE_CLERK_PUBLISHABLE_KEY: undefined,
+        CI: "1",
+      },
+      dependencies: {
+        resolveMetadata: () => metadata,
+        prepare: (context) => {
+          expect(context.environment.NANONI_PRODUCT_VERSION).toBe("1.2.3");
+        },
+        build: (context) => {
+          builds.push(context);
+        },
+        smoke: (context) => {
+          smokes.push({ variant: context.smokeVariant, environment: context.environment });
+        },
+      },
+    });
+
+    expect(result.nodeSidecarPath).toBe(
+      NodePath.join(fixture.stage, resolveNodeSidecarDestination("linux")),
+    );
+    expect(await NodeFS.readFile(result.nodeSidecarPath, "utf8")).toBe("node\n");
+    expect(result.environment).toMatchObject({
+      NANONI_PRODUCT_VERSION: "1.2.3",
+      NANONI_COMPAT_SERVER_VERSION: "0.0.34",
+      NANONI_UPSTREAM_TAG: "v0.0.34",
+      APP_VERSION: "0.0.34",
+      CI: "1",
+    });
+    expect(result.environment).not.toHaveProperty("NANONI_NIGHTLY_DATE");
+    expect(JSON.parse(await NodeFS.readFile(fixture.overlay, "utf8"))).toEqual(
+      result.configOverlay,
+    );
+    expect(result.configOverlay.version).toBe("1.2.3");
+    expect(result.configOverlay.build.frontendDist).toBe(NodePath.resolve(fixture.frontend));
+    expect(result.configOverlay.bundle.createUpdaterArtifacts).toBe(false);
+    expect(Object.values(result.configOverlay.bundle.resources)).toEqual([""]);
+    expect(Object.keys(result.configOverlay.bundle.resources)[0]).toBe(
+      `${NodePath.resolve(fixture.stage)}${NodePath.sep}`,
+    );
+    expect(builds).toHaveLength(1);
+    expect(smokes.map(({ variant }) => variant)).toEqual(["normal", "forced-kill"]);
+    expect(smokes[0]?.environment).toMatchObject({
+      NANONI_PRODUCT_VERSION: "1.2.3",
+      NANONI_COMPAT_SERVER_VERSION: "0.0.34",
+      NANONI_UPSTREAM_TAG: "v0.0.34",
+      APP_VERSION: "0.0.34",
+      AGENT_NANONI_SMOKE: "1",
+    });
+    expect(smokes[1]?.environment).toMatchObject({ AGENT_NANONI_SMOKE_KILL_HOST: "1" });
+  });
+
+  it("fails closed for partial Clerk configuration before staging", async () => {
+    const fixture = await makeFixture();
+
+    await expect(
+      buildTauriArtifact({
+        platform: "linux",
+        arch: "x64",
+        stageRoot: fixture.stage,
+        frontendDist: fixture.frontend,
+        serverClosurePath: fixture.server,
+        hostBundlePath: fixture.host,
+        nodeSidecarPath: fixture.node,
+        nodeLicensePath: fixture.nodeLicense,
+        resourceMonitorPath: fixture.monitor,
+        environment: { T3CODE_CLERK_JWT_TEMPLATE: "fork-jwt-only" },
+        dependencies: { resolveMetadata: () => metadata },
+      }),
+    ).rejects.toMatchObject<TauriArtifactError>({ code: "clerk-config-present" });
+
+    await expect(NodeFS.stat(fixture.stage)).rejects.toThrow();
+  });
+
+  it("fails closed when a host output contains a publishable key", async () => {
+    const fixture = await makeFixture();
+    await NodeFS.writeFile(fixture.host, "const leaked = 'pk_test_output';\n");
+
+    await expect(
+      buildTauriArtifact({
+        platform: "linux",
+        arch: "x64",
+        stageRoot: fixture.stage,
+        frontendDist: fixture.frontend,
+        serverClosurePath: fixture.server,
+        hostBundlePath: fixture.host,
+        nodeSidecarPath: fixture.node,
+        nodeLicensePath: fixture.nodeLicense,
+        resourceMonitorPath: fixture.monitor,
+        dependencies: { resolveMetadata: () => metadata },
+      }),
+    ).rejects.toMatchObject<TauriArtifactError>({ code: "clerk-config-present" });
+  });
+
+  it("rejects a Node sidecar from a different target tuple", async () => {
+    const fixture = await makeFixture();
+    await expect(
+      buildTauriArtifact({
+        platform: "linux",
+        arch: "arm64",
+        stageRoot: fixture.stage,
+        frontendDist: fixture.frontend,
+        serverClosurePath: fixture.server,
+        hostBundlePath: fixture.host,
+        nodeSidecarPath: fixture.node,
+        nodeLicensePath: fixture.nodeLicense,
+        resourceMonitorPath: fixture.monitor,
+        dependencies: { resolveMetadata: () => metadata },
+      }),
+    ).rejects.toMatchObject<TauriArtifactError>({ code: "invalid-input" });
+  });
+
+  it("keeps CLI parsing pure and maps platform aliases", () => {
+    const parsed = parseTauriArtifactArguments(
+      [
+        "--platform",
+        "win32",
+        "--arch",
+        "arm64",
+        "--server",
+        "server",
+        "--node",
+        "agent-nanoni-node-win-arm64.exe",
+        "--node-license",
+        "NODE_LICENSE.txt",
+        "--resource-monitor",
+        "monitor.exe",
+        "--product-version",
+        "1.2.3",
+        "--skip-build",
+        "--skip-smoke",
+      ],
+      { rootDir: "C:/repo" },
+    );
+
+    expect(parsed.platform).toBe("win");
+    expect(parsed.arch).toBe("arm64");
+    expect(parsed.skipBuild).toBe(true);
+    expect(resolveNodeSidecarSourceName("win", "arm64")).toBe("agent-nanoni-node-win-arm64.exe");
+  });
+
+  it("rejects CLI packaging without explicit version, license, or smoke binary", () => {
+    const base = [
+      "--server",
+      "server",
+      "--node",
+      "agent-nanoni-node-linux-x64",
+      "--resource-monitor",
+      "monitor",
+    ];
+    expect(() => parseTauriArtifactArguments([...base, "--node-license", "LICENSE"])).toThrow(
+      /--product-version is required/,
+    );
+    expect(() =>
+      parseTauriArtifactArguments([
+        ...base,
+        "--node-license",
+        "LICENSE",
+        "--product-version",
+        "1.2.3",
+      ]),
+    ).toThrow(/--binary is required/);
+  });
+
+  it("creates an updater-disabled overlay without touching the base config", () => {
+    const overlay = createTauriConfigOverlay({
+      productVersion: "1.2.3",
+      frontendDist: "./dist",
+      stageRoot: "./stage",
+    });
+    expect(overlay).toMatchObject({
+      version: "1.2.3",
+      build: { frontendDist: NodePath.resolve("./dist") },
+      bundle: { createUpdaterArtifacts: false },
+    });
+  });
+});
