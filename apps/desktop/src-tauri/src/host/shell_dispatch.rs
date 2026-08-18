@@ -230,6 +230,12 @@ impl<P: ShellPlatform> ShellDispatcher<P> {
             .map(|result| result.map_err(adapter_error))
     }
 
+    pub fn try_next_broker_event(&mut self) -> Option<Result<RpcNotification, RpcError>> {
+        self.broker
+            .try_next_event()
+            .map(|result| result.map_err(adapter_error))
+    }
+
     pub fn drain_broker_events(&mut self) -> Vec<Result<RpcNotification, RpcError>> {
         let mut events = Vec::new();
         while let Some(event) = self.next_broker_event() {

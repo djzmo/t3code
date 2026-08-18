@@ -234,6 +234,12 @@ impl RpcProcessBroker {
         Some(self.event_to_notification(event))
     }
 
+    /// Converts one already-queued native event without blocking the caller.
+    pub fn try_next_event(&mut self) -> Option<Result<RpcNotification, RpcAdapterError>> {
+        let event = self.broker.events().try_next()?;
+        Some(self.event_to_notification(event))
+    }
+
     pub fn transport_close(&mut self) {
         let _ = self.broker.transport_close();
         self.attempts.clear();
