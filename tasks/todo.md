@@ -10,7 +10,7 @@
 ## Wave 1
 
 - [x] V3-policy: tags-only baseline, product version, and remote CLI pin seed.
-- [ ] V0: Electron benchmark harness and report baseline section.
+- [x] V0: Electron benchmark harness and report baseline section.
 - [x] V1.0a: TypeScript Appendix B schemas and positive fixtures.
 - [x] V1.0b: framing, limit, and failure fixtures.
 - [ ] V1.0c: Rust crate and matching serde protocol model.
@@ -21,11 +21,11 @@
 
 ## Wave 2
 
-- [ ] V1.1a: Tauri host composition and environment layer.
-- [ ] V1.1b: Tauri app/Clerk lifecycle facade.
-- [ ] V1.1c: IPC and bounded service stubs.
-- [ ] V1.1d: window facade, FakeShell, and host integration test.
-- [ ] V1.1e: managed child-spawner decorator and spawn-boundary audits.
+- [x] V1.1a: Tauri host composition and environment layer.
+- [x] V1.1b: Tauri app/Clerk lifecycle facade.
+- [x] V1.1c: IPC and bounded service stubs.
+- [x] V1.1d: window facade, FakeShell, and host integration test.
+- [x] V1.1e: managed child-spawner decorator and spawn-boundary audits.
 - [ ] V1.2a: Tauri application/capability scaffold.
 - [ ] V1.2b: framed RPC transport and peer supervision.
 - [ ] V1.2c: official Node sidecar acquisition.
