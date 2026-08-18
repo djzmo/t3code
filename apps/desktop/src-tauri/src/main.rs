@@ -273,7 +273,7 @@ impl<R: tauri::Runtime> ShellPlatform for TauriShellPlatform<R> {
             ),
             None => WebviewUrl::default(),
         };
-        let expected_dev_url = if cfg!(debug_assertions) {
+        let expected_dev_url = if tauri::is_dev() {
             self.app
                 .config()
                 .build
@@ -556,7 +556,7 @@ impl<R: tauri::Runtime> ShellPlatform for TauriShellPlatform<R> {
                     .name("nanoni-lifecycle-continuation".to_owned())
                     .spawn(move || match continuation {
                         Continuation::Exit(code) => app.exit(code),
-                        Continuation::Restart if cfg!(debug_assertions) => app.exit(75),
+                        Continuation::Restart if tauri::is_dev() => app.exit(75),
                         Continuation::Restart => app.request_restart(),
                         Continuation::Install => {
                             eprintln!("updater installation is unavailable in Phase 0");
@@ -833,7 +833,10 @@ fn resolve_sidecar_spec<R: tauri::Runtime>(
         .path()
         .resource_dir()
         .map_err(|error| error.to_string())?;
-    let is_dev = cfg!(debug_assertions);
+    // A debug bundle still enables Tauri's `custom-protocol` feature and must
+    // resolve packaged resources. `debug_assertions` only describes compiler
+    // optimization mode; Tauri's runtime predicate distinguishes `tauri dev`.
+    let is_dev = tauri::is_dev();
     let current_dir = if is_dev {
         env::current_dir().ok()
     } else {
@@ -893,7 +896,7 @@ fn resolve_sidecar_spec<R: tauri::Runtime>(
         tauri_version: SIDE_CAR_TAURI_VERSION.to_owned(),
         platform: env::consts::OS.to_owned(),
         arch: env::consts::ARCH.to_owned(),
-        is_dev: cfg!(debug_assertions),
+        is_dev,
         exec_path,
         resource_dir: resource_dir.to_string_lossy().into_owned(),
         server_root: server_root.to_string_lossy().into_owned(),
