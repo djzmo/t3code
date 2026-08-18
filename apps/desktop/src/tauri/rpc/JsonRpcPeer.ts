@@ -311,7 +311,7 @@ export class JsonRpcPeer {
     try {
       const result = await handler(params, { id, signal: controller.signal });
       if (controller.signal.aborted || this.#closed !== undefined) return;
-      await this.#write({ jsonrpc: "2.0", id, result });
+      await this.#write({ jsonrpc: "2.0", id, result: decodeMethodResult(method, result) });
     } catch (cause) {
       if (controller.signal.aborted || this.#closed !== undefined) return;
       await this.#write({

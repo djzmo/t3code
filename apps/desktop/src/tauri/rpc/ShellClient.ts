@@ -219,6 +219,15 @@ export class ShellClient {
     return this.#peer.onNotification(method, (params) => handler(params as RpcParams<M>));
   }
 
+  onRequest<M extends RpcMethodName>(
+    method: M,
+    handler: (params: RpcParams<M>, signal: AbortSignal) => RpcResult<M> | Promise<RpcResult<M>>,
+  ): () => void {
+    return this.#peer.onRequest(method, (params, context) =>
+      handler(params as RpcParams<M>, context.signal),
+    );
+  }
+
   on<M extends RpcMethodName>(
     method: M,
     handler: (params: RpcParams<M>) => void | Promise<void>,

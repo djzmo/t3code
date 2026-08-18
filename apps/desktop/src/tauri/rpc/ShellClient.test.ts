@@ -125,6 +125,22 @@ describe("ShellClient", () => {
     client.close();
   });
 
+  it("handles typed shell-to-host requests", async () => {
+    const pair = setup();
+    const client = new ShellClient({ transport: pair.client });
+    await client.ready;
+    const remove = client.onRequest("ipc.invoke", async ({ channel, payload }) => ({
+      result: { channel, payload },
+    }));
+
+    assert.deepEqual(
+      await pair.shell.request("ipc.invoke", { channel: "desktop:test", payload: { value: 1 } }),
+      { result: { channel: "desktop:test", payload: { value: 1 } } },
+    );
+    remove();
+    client.close();
+  });
+
   it("times out the hello handshake and closes the peer", async () => {
     const pair = transportPair();
     const client = new ShellClient({
