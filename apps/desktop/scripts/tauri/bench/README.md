@@ -11,10 +11,20 @@ recorders.
 - Build Electron and Tauri from the same commit, with the same configuration,
   seeded database, branding, machine, and fixed workload (one project, one
   idle thread, terminal open).
+- A sign-off result records a full 40-hex git SHA and `commit.clean: true`, plus
+  an artifact identity (`path`, `name`, byte `bytes`, and 64-hex `sha256`) and
+  the machine, concrete config identity/digest, seed snapshot identity/digest,
+  branding, and workload identity fields. It also requires both size values,
+  three qualifying idle runs and their verified aggregate, and exactly five
+  cold starts. The pair report rejects any Electron/Tauri result that differs
+  in the identity fields.
 - Record installer and installed payload sizes once per artifact.
-- Capture process-tree RSS and idle CPU every 10 seconds for five minutes. Do
-  at least three runs. Reduce each run to a median, then reduce those medians
-  to the reported median-of-medians.
+- Capture process-tree RSS and idle CPU every 10 seconds for five minutes. Each
+  sample requires numeric monotonic `elapsedMs`, 10-second spacing with the
+  explicit ±0.5-second tolerance, and at least 300 seconds of covered time
+  (normally 31 samples). A wall-clock `timestamp` is optional. Do at least
+  three runs. Reduce each run to a median, then reduce those medians to the
+  reported median-of-medians.
 - Record five cold launches from process start to backend-ready and report the
   median.
 - Complete the WKWebView, WebKitGTK, and WebView2 checklist manually. Include
@@ -34,16 +44,24 @@ node apps/desktop/scripts/tauri/bench/index.mjs cold-start \
   --result electron-win32.json --durations 120,125,118,121,123
 node apps/desktop/scripts/tauri/bench/index.mjs report \
   --result electron-win32.json --output electron-win32.md
+# Pair validation is required before a comparative report:
+node apps/desktop/scripts/tauri/bench/index.mjs report \
+  --electron electron-win32.json --tauri tauri-win32.json \
+  --output win32-pair.md
 ```
 
 `idle-runs.json` is either an array of runs or `{ "runs": [...] }`. A run has
 `samples`; each sample may be an already aggregated `{rssBytes,cpuPercent}`
 record or a `{rootPid,processes}` snapshot. Process records use `pid`,
 `parentPid` (or `ppid`), `rssBytes` (or `rssKb`), and `cpuPercent` (or `cpu`).
+Every sample also carries numeric `elapsedMs`; `timestamp` may be included for
+human correlation but is not used as the monotonic clock.
 
 Every newly created result and checklist starts with `pending` values. Do not
 replace those values with guessed or local-machine numbers; the baseline is
 filled only during the approved execution checkpoint.
+Until all sign-off fields and measurements are complete, standalone Markdown
+reports are explicitly marked `DRAFT / PROVISIONAL`.
 
 ## Topology A bridge benchmark
 
