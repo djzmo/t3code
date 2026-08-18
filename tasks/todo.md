@@ -3,8 +3,8 @@
 ## Gates
 
 - [x] Reconcile the repository baseline with the frozen plan.
-- [ ] Freeze D-ID with the owner.
-- [ ] Establish the pinned Rust toolchain.
+- [x] Freeze D-ID with the owner.
+- [x] Establish the pinned Rust toolchain.
 - [ ] Obtain approval before each marked browser/computer-use or remote manual pass.
 
 ## Wave 1
@@ -13,11 +13,11 @@
 - [x] V0: Electron benchmark harness and report baseline section.
 - [x] V1.0a: TypeScript Appendix B schemas and positive fixtures.
 - [x] V1.0b: framing, limit, and failure fixtures.
-- [ ] V1.0c: Rust crate and matching serde protocol model.
-- [ ] V1.0d: bidirectional fixture drift/round-trip tests.
+- [x] V1.0c: Rust crate and matching serde protocol model.
+- [x] V1.0d: bidirectional fixture drift/round-trip tests.
 - [x] V1.0e: release-workflow guard and guard test.
 - [ ] V1.0f: toolchain pin and alignment test.
-- [ ] V1.0g: minimal three-OS Tauri CI.
+- [x] V1.0g: minimal three-OS Tauri CI.
 
 ## Wave 2
 
