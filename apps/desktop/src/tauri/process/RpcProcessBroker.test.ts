@@ -114,7 +114,9 @@ describe("RpcProcessBroker", () => {
         pid: 803,
         registrationId: "registration-input",
       }));
-      shell.onNotification("process.input", (value) => received.push({ method: "input", value }));
+      shell.onNotification("process.input", (value) => {
+        received.push({ method: "input", value });
+      });
       shell.onNotification("process.kill", (value) => {
         received.push({ method: "kill", value });
         void shell.notify("process.exit", {
@@ -123,9 +125,9 @@ describe("RpcProcessBroker", () => {
           signal: "SIGTERM",
         });
       });
-      shell.onNotification("process.release", (value) =>
-        received.push({ method: "release", value }),
-      );
+      shell.onNotification("process.release", (value) => {
+        received.push({ method: "release", value });
+      });
       const broker = makeRpcProcessBroker(host);
 
       yield* Effect.scoped(

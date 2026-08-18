@@ -34,7 +34,7 @@ const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$
 export class RpcProcessBrokerError extends Error {
   readonly _tag = "RpcProcessBrokerError" as const;
   readonly operation: string;
-  readonly cause: unknown;
+  override readonly cause: unknown;
 
   constructor(operation: string, message: string, cause?: unknown) {
     super(message);
@@ -167,7 +167,7 @@ export const makeRpcProcessBroker = (
   let disposeOutput = (): void => undefined;
   let disposeExit = (): void => undefined;
 
-  const runSync = (effect: Effect.Effect<void, unknown>): void => {
+  const runSync = <A>(effect: Effect.Effect<A, never>): void => {
     try {
       Effect.runSync(effect);
     } catch {
@@ -365,7 +365,7 @@ export const makeRpcProcessBroker = (
         port: makePort(state, decoded.registrationId),
         outputFds,
         inputFds,
-        queueCapacity: options.queueCapacity,
+        queueCapacity,
       });
       return {
         _tag: "registered",
