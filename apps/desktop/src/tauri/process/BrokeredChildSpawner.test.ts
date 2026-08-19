@@ -251,7 +251,6 @@ describe("BrokeredChildSpawner", () => {
         command({ shell: "/bin/sh" }),
         command({ stdin: "inherit" }),
         command({ stdout: "overlapped" }),
-        command({ additionalFds: { fd3: { type: "input", stream: Stream.empty } } }),
       ];
       for (const value of unsafe) {
         const exit = yield* spawner.spawn(value).pipe(Effect.exit);

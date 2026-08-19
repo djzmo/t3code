@@ -31,7 +31,6 @@ static HANDLER: OnceLock<BeforeQuitHandler> = OnceLock::new();
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallError {
     AlreadyInstalled,
-    #[cfg(target_os = "macos")]
     HookFailed,
 }
 
@@ -39,7 +38,6 @@ impl Display for InstallError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AlreadyInstalled => formatter.write_str("terminate hook is already installed"),
-            #[cfg(target_os = "macos")]
             Self::HookFailed => {
                 formatter.write_str("failed to install macOS applicationShouldTerminate hook")
             }
@@ -71,26 +69,42 @@ pub fn before_quit_event() -> AppEvent {
 ///
 /// On macOS this adds `applicationShouldTerminate:` to tao's app delegate class.
 /// On other platforms this stores the handler and returns `Ok(())` so callers can
-/// share one setup path.
+/// share one setup path. A failed Objective-C attach does not latch the install
+/// flags, so the caller can retry.
 pub fn install(handler: BeforeQuitHandler) -> Result<(), InstallError> {
+    install_with(handler, attach_platform_hook)
+}
+
+fn attach_platform_hook() -> Result<(), InstallError> {
+    #[cfg(all(target_os = "macos", not(test)))]
+    install_application_should_terminate_hook()?;
+    Ok(())
+}
+
+fn install_with(
+    handler: BeforeQuitHandler,
+    attach: impl FnOnce() -> Result<(), InstallError>,
+) -> Result<(), InstallError> {
     if INSTALLED.swap(true, Ordering::AcqRel) {
         return Err(InstallError::AlreadyInstalled);
+    }
+    if let Err(error) = attach() {
+        INSTALLED.store(false, Ordering::Release);
+        return Err(error);
     }
     if HANDLER.set(handler).is_err() {
         INSTALLED.store(false, Ordering::Release);
         return Err(InstallError::AlreadyInstalled);
     }
-    #[cfg(target_os = "macos")]
-    install_application_should_terminate_hook()?;
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn install_application_should_terminate_hook() -> Result<(), InstallError> {
     imp::install_application_should_terminate_hook()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 #[allow(
     unsafe_code,
     clippy::undocumented_unsafe_blocks,
@@ -110,14 +124,9 @@ mod imp {
         let class = delegate_class().ok_or(InstallError::HookFailed)?;
         let selector = sel!(applicationShouldTerminate:);
         unsafe {
-            if class.responds_to(selector) {
-                let method = class
-                    .instance_method(selector)
-                    .ok_or(InstallError::HookFailed)?;
-                let _previous = method.set_implementation(application_should_terminate as Imp);
-                return Ok(());
-            }
-
+            // `class_addMethod` succeeds only when this class does not already
+            // define the selector, including when a parent implements it.
+            // tao's `TaoAppDelegateParent` does not, so this is the leaf add.
             let types = CStr::from_bytes_with_nul(b"Q@:@\0").expect("static method types");
             let added = class_addMethod(
                 class as *mut _,
@@ -125,9 +134,14 @@ mod imp {
                 application_should_terminate as Imp,
                 types.as_ptr(),
             );
-            if !Bool::new(added).as_bool() {
-                return Err(InstallError::HookFailed);
+            if Bool::new(added).as_bool() {
+                return Ok(());
             }
+
+            let method = class
+                .instance_method(selector)
+                .ok_or(InstallError::HookFailed)?;
+            let _previous = method.set_implementation(application_should_terminate as Imp);
         }
         Ok(())
     }
@@ -176,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn install_is_idempotent() {
+    fn install_retries_after_hook_failure_then_rejects_a_second_success() {
         let handler: BeforeQuitHandler = Arc::new(|| false);
         if INSTALLED.load(Ordering::Acquire) {
             assert_eq!(
@@ -185,7 +199,11 @@ mod tests {
             );
             return;
         }
-        assert!(install(handler).is_ok());
+        assert_eq!(
+            install_with(Arc::clone(&handler), || Err(InstallError::HookFailed)),
+            Err(InstallError::HookFailed)
+        );
+        assert!(install(Arc::clone(&handler)).is_ok());
         assert_eq!(
             install(Arc::new(|| false) as BeforeQuitHandler),
             Err(InstallError::AlreadyInstalled)
