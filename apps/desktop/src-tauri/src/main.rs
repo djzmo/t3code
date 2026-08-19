@@ -1088,6 +1088,7 @@ fn setup_sidecar<R: tauri::Runtime>(
         TauriShellPlatform::new(app.handle().clone(), runtime.clone()),
         RpcProcessBroker::new(process_broker),
     );
+    let lifecycle_gate = dispatcher.lifecycle_gate();
     let broker_events = dispatcher.subscribe_broker_events();
     let dispatcher = Arc::new(Mutex::new(dispatcher));
     let app_event_dispatcher = Arc::clone(&dispatcher);
@@ -1160,17 +1161,28 @@ fn setup_sidecar<R: tauri::Runtime>(
         .set_sidecar(Arc::clone(&sidecar))
         .map_err(std::io::Error::other)?;
     spawn_broker_event_pump(broker_events, sidecar);
-    let runtime_for_terminate = runtime.clone();
+    let terminate_dispatcher = Arc::clone(&dispatcher);
     agent_nanoni_desktop::macos_terminate::install(Arc::new(move || {
-        match runtime_for_terminate
-            .dispatch_app_event(agent_nanoni_desktop::macos_terminate::before_quit_event())
-        {
-            Ok(transition) => transition_prevents_exit(&transition),
-            Err(error) => {
-                eprintln!("native macOS terminate dispatch failed: {error}");
-                true
-            }
+        let plan = lifecycle_gate.native_quit(LifecycleQuitReason::User);
+        if let Some(error) = plan.error {
+            eprintln!("native macOS terminate gate failed: {error}");
         }
+        if let Some(transition) = plan.transition {
+            let terminate_dispatcher = Arc::clone(&terminate_dispatcher);
+            thread::spawn(move || match terminate_dispatcher.lock() {
+                Ok(mut dispatcher) => {
+                    if let Err(error) = dispatcher.apply_transition(transition) {
+                        eprintln!("native macOS terminate effects failed: {}", error.message);
+                    }
+                }
+                Err(_) => {
+                    eprintln!(
+                        "native macOS terminate effects skipped: dispatcher lock is poisoned"
+                    );
+                }
+            });
+        }
+        plan.prevents_exit()
     }))
     .map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(())

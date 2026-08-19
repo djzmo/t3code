@@ -301,6 +301,18 @@ impl<P: ShellPlatform> ShellDispatcher<P> {
         self.lifecycle_gate.native_quit(reason)
     }
 
+    /// Applies a previously reduced lifecycle transition without reducing again.
+    ///
+    /// Native quit callbacks must decide Cancel/Now via [`Self::native_quit`]
+    /// (or the shared [`LifecycleGate`]), then apply the stored transition
+    /// after the callback returns.
+    pub fn apply_transition(
+        &mut self,
+        transition: AppTransition,
+    ) -> Result<AppTransition, RpcError> {
+        self.apply_app_transition(transition)
+    }
+
     fn apply_app_transition(
         &mut self,
         transition: AppTransition,
@@ -1202,6 +1214,51 @@ mod tests {
         assert_eq!(
             dispatch.platform.effect_gate_state,
             Some(Ok(State::Running))
+        );
+    }
+
+    #[test]
+    fn native_quit_plan_is_applied_without_reducing_again() {
+        let mut dispatch = dispatcher();
+        let plan = dispatch.native_quit(QuitReason::User);
+        assert!(plan.prevents_exit());
+        assert_eq!(plan.before_quit, Some(QuitReason::User));
+        let transition = plan
+            .transition
+            .expect("native quit should produce a transition");
+        dispatch
+            .apply_transition(transition)
+            .expect("applying a native quit transition should succeed");
+        assert_eq!(
+            dispatch.app_state(),
+            State::QuitRequested {
+                reason: QuitReason::User,
+                continuation: Continuation::Exit(0),
+            }
+        );
+        assert_eq!(
+            app_effects(&dispatch),
+            &[
+                AppEffect::PreventExit,
+                AppEffect::BeforeQuit {
+                    reason: QuitReason::User,
+                },
+                AppEffect::BeforeQuitResponse { prevented: true },
+            ]
+        );
+
+        let second = dispatch.native_quit(QuitReason::Menu);
+        assert!(second.prevents_exit());
+        assert_eq!(second.before_quit, None);
+        assert_eq!(
+            app_effects(&dispatch),
+            &[
+                AppEffect::PreventExit,
+                AppEffect::BeforeQuit {
+                    reason: QuitReason::User,
+                },
+                AppEffect::BeforeQuitResponse { prevented: true },
+            ]
         );
     }
 
