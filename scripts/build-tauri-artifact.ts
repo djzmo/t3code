@@ -181,7 +181,8 @@ export class TauriArtifactError extends Error {
     | "invalid-input"
     | "clerk-config-present"
     | "payload-budget-exceeded"
-    | "unsafe-payload";
+    | "unsafe-payload"
+    | "frontend-dist-not-relative";
 
   constructor(code: TauriArtifactError["code"], message: string, options?: ErrorOptions) {
     super(message, options);
@@ -310,13 +311,28 @@ const assertClerkConfigurationAbsent = (
 const defaultOverlayPath = (stageRoot: string): string =>
   NodePath.join(NodePath.dirname(stageRoot), "tauri.phase0.conf.json");
 
+/** Absolute `frontendDist` makes wry load `file://`, which the shell's
+ *  same-origin guard rejects. Keep the overlay path relative to `src-tauri`
+ *  so Tauri serves the UI on `http://tauri.localhost`. */
+export const toTauriOverlayFrontendDist = (frontendDist: string, stageRoot: string): string => {
+  const srcTauriDir = NodePath.dirname(NodePath.resolve(stageRoot));
+  const relative = NodePath.relative(srcTauriDir, NodePath.resolve(frontendDist));
+  if (NodePath.isAbsolute(relative)) {
+    throw new TauriArtifactError(
+      "frontend-dist-not-relative",
+      `frontendDist '${frontendDist}' is not relative to the Tauri crate at '${srcTauriDir}'.`,
+    );
+  }
+  return (relative === "" ? "." : relative).split(NodePath.sep).join("/");
+};
+
 export const createTauriConfigOverlay = (input: {
   readonly productVersion: string;
   readonly frontendDist: string;
   readonly stageRoot: string;
 }): TauriConfigOverlay => ({
   version: input.productVersion,
-  build: { frontendDist: NodePath.resolve(input.frontendDist) },
+  build: { frontendDist: toTauriOverlayFrontendDist(input.frontendDist, input.stageRoot) },
   bundle: {
     // Tauri preserves directory structure for directory mappings. A glob map
     // would flatten every match into the destination and collide on common
@@ -775,7 +791,19 @@ export const resolveTauriSmokeBundlePath = async ({
   profile,
 }: ResolveTauriSmokeBundleOptions): Promise<string> => {
   if (platform === "win") {
-    throw new Error("Windows packaged smoke remains pending the bootstrap transport decision.");
+    const executable = NodePath.resolve(
+      rootDir,
+      "apps/desktop/src-tauri/target",
+      profile,
+      "agent-nanoni-desktop.exe",
+    );
+    const stats = await NodeFS.stat(executable).catch((cause) => {
+      throw new Error(`Windows smoke executable is unavailable: ${executable}`, { cause });
+    });
+    if (!stats.isFile()) {
+      throw new Error(`Windows smoke executable is not a regular file: ${executable}`);
+    }
+    return executable;
   }
 
   const bundleRoot = NodePath.resolve(rootDir, "apps/desktop/src-tauri/target", profile, "bundle");
@@ -883,14 +911,13 @@ const createCliHooks = (options: TauriArtifactCliOptions) => {
     );
   };
   const smoke: TauriArtifactHook = async (context) => {
-    if (platform === "win") {
-      throw new Error("Windows packaged smoke remains pending the bootstrap transport decision.");
-    }
-    const bundlePath = await resolveTauriSmokeBundlePath({
-      rootDir,
-      platform,
-      profile: options.debug ? "debug" : "release",
-    });
+    const bundlePath =
+      options.binaryPath ??
+      (await resolveTauriSmokeBundlePath({
+        rootDir,
+        platform,
+        profile: options.debug ? "debug" : "release",
+      }));
     await spawnCommand(
       process.execPath,
       [
@@ -1061,9 +1088,6 @@ export const parseTauriArtifactArguments = (
     ["--product-version", values.productVersion],
   ] as const;
   for (const [flag, value] of required) if (!value) throw new Error(`${flag} is required.`);
-  if (finalPlatform === "win" && !values.skipSmoke) {
-    throw new Error("Windows packaged smoke remains pending the bootstrap transport decision.");
-  }
   return values as TauriArtifactCliOptions;
 };
 

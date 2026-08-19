@@ -13,13 +13,21 @@ records execution order and ownership; it does not amend the frozen architecture
 - Electron modules remain intact. Fork work stays in the paths allowed by section 12.
 - Topology A is the only active renderer transport. Topology B remains parked.
 
+## Current work (2026-08-20)
+
+Owner approved the three remaining Phase 0 gates. Execution plan:
+[`tasks/phase0-owner-gates.md`](phase0-owner-gates.md).
+
+- Gate 1 (macOS terminate hook) and Gate 2 (Windows stdin/fd0) are in the tree.
+- Gate 3 packaged Windows smokes (normal + `--kill-host`) passed; WebView2 launch
+  is smoke-pass. Tauri Pilot is skipped unattended (feature-flagged rebuild).
+
 ## Open gates
 
-- D-ID: owner must freeze the working identity values before V1.2 starts.
-- Rust: no Rust toolchain is installed on the current Windows host. Rust verification
-  starts after the owner approves a user-level toolchain installation or provides one.
+- Live macOS Cmd+Q and Linux WebKitGTK/AppImage still need those OS environments.
 - Browser/computer-use, LAN/Tailscale, packaged Wayland, and three-OS manual checks
   require execution-time owner approval where rev 26 marks them with the stop sign.
+  Gate 3 is the approved Windows execution slice.
 
 ## Dependency graph and execution waves
 

@@ -96,7 +96,8 @@ const runSmoke = async (options) => {
     const child = NodeChildProcess.spawn(options.binary, options.childArguments, {
       cwd: options.cwd,
       detached: process.platform !== "win32",
-      windowsHide: true,
+      // CREATE_NO_WINDOW can prevent WebView2 from initializing JS on Windows.
+      windowsHide: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,

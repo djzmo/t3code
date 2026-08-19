@@ -25,7 +25,7 @@ const makeHandle = (
     exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(exitCode)),
     isRunning: Effect.succeed(false),
     kill: () => Effect.void,
-    stdin: Sink.forEach(() => Effect.void),
+    stdin: Sink.forEach((bytes) => writeInput(0, bytes)),
     stdout: Stream.make(new TextEncoder().encode("hello\n")),
     stderr: Stream.empty,
     all: Stream.make(new TextEncoder().encode("hello\n")),
@@ -93,6 +93,44 @@ describe("BrokeredChildSpawner", () => {
           { fd: 5, direction: "output" },
         ],
       });
+    }),
+  );
+
+  it.effect("forwards stdin streams after the broker registers the child", () =>
+    Effect.gen(function* () {
+      const writes = yield* Queue.unbounded<{ readonly fd: number; readonly bytes: Uint8Array }>();
+      let received: ProcessSpawnParams | undefined;
+      const broker: RpcProcessBroker = {
+        spawn: (params: ProcessSpawnParams) => {
+          received = params;
+          return Effect.succeed({
+            _tag: "registered",
+            processId: "process-stdin",
+            pid: ChildProcessSpawner.ProcessId(46),
+            registrationId: "registration-stdin",
+            handle: makeHandle((fd, bytes) => Queue.offer(writes, { fd, bytes })),
+          } as const);
+        },
+        close: () => undefined,
+        activeProcessCount: () => 1,
+      };
+      const spawner = makeBrokeredChildSpawner({ broker });
+      const bytes = (value: string) => new TextEncoder().encode(value);
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* spawner.spawn(
+            command({
+              stdin: Stream.make(bytes("bootstrap-json\n")),
+            }),
+          );
+          const receivedWrite = yield* Queue.take(writes);
+          assert.equal(receivedWrite.fd, 0);
+          assert.equal(new TextDecoder().decode(receivedWrite.bytes), "bootstrap-json\n");
+        }),
+      );
+
+      assert.equal(received?.stdin, "pipe");
     }),
   );
 
@@ -199,7 +237,7 @@ describe("BrokeredChildSpawner", () => {
     }),
   );
 
-  it.effect("rejects piped commands and unsafe native modes", () =>
+  it.effect("rejects piped commands and unsupported native modes", () =>
     Effect.gen(function* () {
       const broker: RpcProcessBroker = {
         spawn: () => Effect.die("spawn should not be called"),

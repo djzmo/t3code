@@ -5,7 +5,23 @@
 - [x] Reconcile the repository baseline with the frozen plan.
 - [x] Freeze D-ID with the owner.
 - [x] Establish the pinned Rust toolchain.
-- [ ] Obtain approval before each marked browser/computer-use or remote manual pass.
+- [x] Owner approved macOS terminate hook, Windows stdin/fd0, and Windows packaged launches.
+- [ ] Obtain approval before remaining macOS/Linux manual passes.
+
+## Owner-gate wave (see `tasks/phase0-owner-gates.md`)
+
+- [x] Task 1: macOS `applicationShouldTerminate:` hook (Composer `gate1-macos-terminate`).
+- [x] Task 2: Windows primary stdin/`--bootstrap-fd 0`, no fd4/fd5 (Composer `gate2-windows-stdin`).
+- [x] Checkpoint: source diffs reviewed; accidental `gen/schemas` reverted; ledger updated.
+- [x] Task 3: Windows rebuild, packaged smoke, WebView2 launch evidence.
+- [x] Fix: brokered stdin Stream pump (smoke failure `not transport-representable`).
+- [x] Re-smoke after stdin pump: `backend-ready` yes, `first-roundtrip` no.
+- [x] Smoke-only renderer `host_invoke` probe (init script + page-load eval + retries).
+- [x] Allow WebView2 `about:blank` first navigation.
+- [x] Relative `frontendDist` overlay (avoid `file://` origin rejection).
+- [x] Packaged Windows smokes: normal + `--kill-host` both passed.
+- [ ] Topology A / Tauri Pilot (`--features topology-a-pilot`) — skipped unattended (needs a feature-flagged rebuild; prior attach: `No tauri-pilot instances directory found`). Not a source merge blocker.
+- [ ] macOS/Linux packaged smokes, live Cmd+Q, AppImage/Wayland, LAN/Tailscale (environment-blocked / unattended skip).
 
 ## Wave 1
 

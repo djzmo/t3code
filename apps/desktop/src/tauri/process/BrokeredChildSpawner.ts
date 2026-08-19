@@ -49,7 +49,7 @@ const configuredStream = (
     | undefined,
   method: string,
 ): ChildProcess.CommandInput | ChildProcess.CommandOutput | undefined => {
-  if (value === undefined || typeof value !== "object") return value;
+  if (value === undefined || typeof value !== "object" || Stream.isStream(value)) return value;
   if ("stream" in value) {
     return (value as { readonly stream?: unknown }).stream as
       | ChildProcess.CommandInput
@@ -58,6 +58,13 @@ const configuredStream = (
   }
   throw invalid(method, "embedded stream or sink is not transport-representable");
 };
+
+const stdinInputStream = (
+  value: ChildProcess.CommandInput | undefined,
+): Stream.Stream<Uint8Array, PlatformError.PlatformError> | undefined =>
+  Stream.isStream(value)
+    ? (value as Stream.Stream<Uint8Array, PlatformError.PlatformError>)
+    : undefined;
 
 interface InputFdStream {
   readonly fd: number;
@@ -97,6 +104,7 @@ const additionalFds = (
 
 interface BrokerSpawnRequest {
   readonly params: ProcessSpawnParams;
+  readonly stdinStream: Stream.Stream<Uint8Array, PlatformError.PlatformError> | undefined;
   readonly inputStreams: ReadonlyArray<InputFdStream>;
 }
 
@@ -140,6 +148,7 @@ const toSpawnRequest = (
       stderr: pipeMode(stderr, "stderr"),
       additionalFds: configuredAdditionalFds.fds,
     },
+    stdinStream: stdinInputStream(stdin),
     inputStreams: configuredAdditionalFds.inputStreams,
   };
 };
@@ -172,6 +181,9 @@ export const makeBrokeredChildSpawner = (
 
       // Match the native Effect spawner: input streams are started only after
       // the child handle exists, and each pump is tied to the caller's scope.
+      if (request.stdinStream !== undefined) {
+        yield* Stream.run(request.stdinStream, result.handle.stdin).pipe(Effect.forkScoped);
+      }
       yield* Effect.forEach(
         request.inputStreams,
         ({ fd, stream }) =>

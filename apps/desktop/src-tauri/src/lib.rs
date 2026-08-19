@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 //! Agent Nanoni's native desktop shell.
 //!
@@ -10,6 +10,7 @@ pub mod app_events;
 pub mod bridge;
 pub mod host;
 pub mod lifecycle;
+pub mod macos_terminate;
 pub mod opener;
 pub mod rpc;
 pub mod window;

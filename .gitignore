@@ -29,6 +29,7 @@ dist-electron/
 apps/desktop/dist-tauri-host/
 apps/desktop/src-tauri/binaries/
 apps/desktop/src-tauri/stage/
+apps/desktop/src-tauri/tauri.phase0.conf.json
 .electron-runtime/
 .showcase/
 apps/mobile/.showcase/

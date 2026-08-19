@@ -35,7 +35,8 @@ use agent_nanoni_desktop::rpc::protocol::{
     WindowZoomParams,
 };
 use agent_nanoni_desktop::window::{
-    NavigationDecision, is_application_entry_url, navigation_decision, new_window_decision,
+    NavigationDecision, is_application_entry_url, is_webview_placeholder_url, navigation_decision,
+    new_window_decision,
 };
 use serde_json::{Value, json};
 use tauri::ipc::Channel;
@@ -355,10 +356,16 @@ impl<R: tauri::Runtime> ShellPlatform for TauriShellPlatform<R> {
             .resizable(true)
             .visible(params.show)
             .on_navigation(move |url| {
+                if env::var_os("AGENT_NANONI_SMOKE").as_deref() == Some(std::ffi::OsStr::new("1")) {
+                    eprintln!("AGENT_NANONI_SMOKE navigation {url}");
+                }
                 let Ok(application_url) = navigation_runtime.application_url_optional() else {
                     return false;
                 };
                 let Some(application_url) = application_url else {
+                    if is_webview_placeholder_url(url.as_str()) {
+                        return true;
+                    }
                     if !is_application_entry_url(expected_dev_url.as_deref(), url.as_str()) {
                         return false;
                     }
@@ -393,6 +400,16 @@ impl<R: tauri::Runtime> ShellPlatform for TauriShellPlatform<R> {
                 return Err("window initialization scripts must not be empty".to_owned());
             }
             builder = builder.initialization_script(script);
+        }
+        if let Some(script) = smoke_roundtrip_init_script() {
+            builder = builder
+                .initialization_script(script)
+                .on_page_load(|window, payload| {
+                    if payload.event() != tauri::webview::PageLoadEvent::Finished {
+                        return;
+                    }
+                    let _ = window.eval(SMOKE_ROUNDTRIP_INIT_SCRIPT);
+                });
         }
         let window = builder.build().map_err(|error| error.to_string())?;
         let sidecar = self.runtime.sidecar()?;
@@ -693,7 +710,12 @@ fn host_invoke(
         HostInvokeRequest { channel, payload },
         state.inner(),
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| {
+        if env::var_os("AGENT_NANONI_SMOKE").as_deref() == Some(std::ffi::OsStr::new("1")) {
+            eprintln!("AGENT_NANONI_SMOKE host_invoke-failed: {error}");
+        }
+        error.to_string()
+    })?;
     state.mark_smoke_roundtrip();
     Ok(response.result)
 }
@@ -1138,6 +1160,19 @@ fn setup_sidecar<R: tauri::Runtime>(
         .set_sidecar(Arc::clone(&sidecar))
         .map_err(std::io::Error::other)?;
     spawn_broker_event_pump(broker_events, sidecar);
+    let runtime_for_terminate = runtime.clone();
+    agent_nanoni_desktop::macos_terminate::install(Arc::new(move || {
+        match runtime_for_terminate
+            .dispatch_app_event(agent_nanoni_desktop::macos_terminate::before_quit_event())
+        {
+            Ok(transition) => transition_prevents_exit(&transition),
+            Err(error) => {
+                eprintln!("native macOS terminate dispatch failed: {error}");
+                true
+            }
+        }
+    }))
+    .map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(())
 }
 
@@ -1196,6 +1231,39 @@ fn native_exit_event(code: Option<i32>, has_no_windows: bool) -> NativeEvent {
             reason: LifecycleQuitReason::User,
         }
     }
+}
+
+/// Renderer probe used only by packaged smoke.  The Nanoni init script does not
+/// call `host_invoke` until the SPA uses an async bridge method, so smoke would
+/// otherwise wait forever after `backend-ready`.  The first attempt often runs
+/// before the main origin is authorized; retry until invoke succeeds.
+const SMOKE_ROUNDTRIP_INIT_SCRIPT: &str = r#"(function () {
+  "use strict";
+  if (window.__NANONI_SMOKE_ROUNDTRIP__) return;
+  var attempts = 0;
+  function tryInvoke() {
+    attempts += 1;
+    if (attempts > 200) return;
+    var internals = window.__TAURI_INTERNALS__;
+    if (!internals || typeof internals.invoke !== "function") {
+      setTimeout(tryInvoke, 50);
+      return;
+    }
+    Promise.resolve(internals.invoke("host_invoke", {
+      channel: "desktop:get-client-settings",
+      payload: null
+    })).then(function () {
+      window.__NANONI_SMOKE_ROUNDTRIP__ = true;
+    }, function () {
+      setTimeout(tryInvoke, 50);
+    });
+  }
+  tryInvoke();
+})();"#;
+
+fn smoke_roundtrip_init_script() -> Option<&'static str> {
+    (env::var_os("AGENT_NANONI_SMOKE").as_deref() == Some(std::ffi::OsStr::new("1")))
+        .then_some(SMOKE_ROUNDTRIP_INIT_SCRIPT)
 }
 
 fn transition_prevents_exit(transition: &AppTransition) -> bool {
@@ -1259,8 +1327,8 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        native_exit_event, sidecar_compatible_path, topology_a_benchmark_enabled,
-        transition_prevents_exit,
+        SMOKE_ROUNDTRIP_INIT_SCRIPT, native_exit_event, sidecar_compatible_path,
+        topology_a_benchmark_enabled, transition_prevents_exit,
     };
 
     #[test]
@@ -1292,6 +1360,13 @@ mod tests {
         assert!(!topology_a_benchmark_enabled(None));
         assert!(!topology_a_benchmark_enabled(Some("true")));
         assert!(!topology_a_benchmark_enabled(Some("0")));
+    }
+
+    #[test]
+    fn smoke_roundtrip_script_invokes_host_from_the_renderer() {
+        assert!(SMOKE_ROUNDTRIP_INIT_SCRIPT.contains("host_invoke"));
+        assert!(SMOKE_ROUNDTRIP_INIT_SCRIPT.contains("desktop:get-client-settings"));
+        assert!(SMOKE_ROUNDTRIP_INIT_SCRIPT.contains("setTimeout"));
     }
 
     #[test]

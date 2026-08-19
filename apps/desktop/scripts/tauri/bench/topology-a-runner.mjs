@@ -203,7 +203,8 @@ export function spawnCapturedApplication(
     env,
     shell: false,
     detached: process.platform !== "win32",
-    windowsHide: true,
+    // CREATE_NO_WINDOW can prevent WebView2 from initializing JS on Windows.
+    windowsHide: process.platform !== "win32",
     stdio: "ignore",
   });
   const pid = Number(child?.pid);

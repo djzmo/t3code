@@ -132,6 +132,18 @@ fn origin_key(url: &tauri::Url) -> Option<(String, String, Option<u16>)> {
     Some((url.scheme().to_ascii_lowercase(), host, port))
 }
 
+/// First-document placeholders used by WebView2 (and other engines) before the
+/// application URL is committed.  Blocking these prevents the real entry URL
+/// from loading, so they must be allowed without becoming the app origin.
+#[must_use]
+pub fn is_webview_placeholder_url(url: &str) -> bool {
+    let candidate = url.trim();
+    candidate.is_empty()
+        || candidate == "about:blank"
+        || candidate == "about:srcdoc"
+        || candidate.starts_with("about:blank?")
+}
+
 /// Validates the first URL before it is allowed to establish the main
 /// webview's application origin. Development builds must match the configured
 /// dev server; packaged builds accept only Tauri's platform asset origins.
@@ -290,6 +302,18 @@ mod tests {
         assert!(is_application_entry_url(None, "tauri://localhost/"));
         assert!(is_application_entry_url(None, "http://tauri.localhost/"));
         assert!(!is_application_entry_url(None, "https://example.com/"));
+        assert!(!is_application_entry_url(None, "about:blank"));
+    }
+
+    #[test]
+    fn webview_placeholder_urls_are_not_application_origins() {
+        assert!(is_webview_placeholder_url("about:blank"));
+        assert!(is_webview_placeholder_url(" about:blank "));
+        assert!(is_webview_placeholder_url("about:blank?unencoded=1"));
+        assert!(is_webview_placeholder_url("about:srcdoc"));
+        assert!(is_webview_placeholder_url(""));
+        assert!(!is_webview_placeholder_url("http://tauri.localhost/"));
+        assert!(!is_webview_placeholder_url("https://example.com/"));
     }
 
     #[test]

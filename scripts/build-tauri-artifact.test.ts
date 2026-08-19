@@ -9,6 +9,7 @@ import {
   TauriArtifactError,
   buildTauriArtifact,
   createTauriConfigOverlay,
+  toTauriOverlayFrontendDist,
   inspectTauriArtifactPayload,
   parseTauriArtifactArguments,
   resolveNodeSidecarDestination,
@@ -125,7 +126,9 @@ describe("Tauri artifact orchestration", () => {
       result.configOverlay,
     );
     expect(result.configOverlay.version).toBe("1.2.3");
-    expect(result.configOverlay.build.frontendDist).toBe(NodePath.resolve(fixture.frontend));
+    expect(result.configOverlay.build.frontendDist).toBe(
+      toTauriOverlayFrontendDist(fixture.frontend, fixture.stage),
+    );
     expect(result.configOverlay.bundle.createUpdaterArtifacts).toBe(false);
     expect(Object.values(result.configOverlay.bundle.resources)).toEqual([""]);
     expect(Object.keys(result.configOverlay.bundle.resources)[0]).toBe(
@@ -416,17 +419,12 @@ describe("Tauri artifact orchestration", () => {
     expect(parsed.platform).toBe("linux");
     expect(parsed.binaryPath).toBeUndefined();
 
-    expect(() =>
-      parseTauriArtifactArguments(
-        [...base, "--node-license", "LICENSE", "--product-version", "1.2.3"],
-        { platform: "win" },
-      ),
-    ).toThrow(/Windows packaged smoke remains pending/);
     const windows = parseTauriArtifactArguments(
-      [...base, "--node-license", "LICENSE", "--product-version", "1.2.3", "--skip-smoke"],
+      [...base, "--node-license", "LICENSE", "--product-version", "1.2.3"],
       { platform: "win" },
     );
-    expect(windows.skipSmoke).toBe(true);
+    expect(windows.platform).toBe("win");
+    expect(windows.skipSmoke).toBe(false);
   });
 
   it("creates an updater-disabled overlay without touching the base config", () => {
@@ -437,9 +435,10 @@ describe("Tauri artifact orchestration", () => {
     });
     expect(overlay).toMatchObject({
       version: "1.2.3",
-      build: { frontendDist: NodePath.resolve("./dist") },
+      build: { frontendDist: toTauriOverlayFrontendDist("./dist", "./stage") },
       bundle: { createUpdaterArtifacts: false },
     });
+    expect(NodePath.isAbsolute(overlay.build.frontendDist)).toBe(false);
   });
 
   it("runs the Tauri CLI from the desktop project directory", () => {
@@ -512,12 +511,39 @@ describe("Tauri artifact orchestration", () => {
     ).rejects.toThrow(/exactly one macOS app executable/);
   });
 
-  it("keeps Windows packaged smoke explicitly unresolved", async () => {
+  it("resolves the Windows debug executable for packaged smoke", async () => {
+    const fixture = await makeFixture();
+    const executable = NodePath.join(
+      fixture.root,
+      "apps/desktop/src-tauri/target/debug/agent-nanoni-desktop.exe",
+    );
+    await NodeFS.mkdir(NodePath.dirname(executable), { recursive: true });
+    await NodeFS.writeFile(executable, "exe\n");
+    await expect(
+      resolveTauriSmokeBundlePath({ rootDir: fixture.root, platform: "win", profile: "debug" }),
+    ).resolves.toBe(executable);
+  });
+
+  it("rejects a Windows smoke executable that is missing", async () => {
     const fixture = await makeFixture();
     await expect(
       resolveTauriSmokeBundlePath({ rootDir: fixture.root, platform: "win", profile: "debug" }),
-    ).rejects.toThrow(/Windows packaged smoke remains pending/);
+    ).rejects.toThrow(/Windows smoke executable is unavailable/);
   });
+
+  it.skipIf(process.platform !== "win32")(
+    "rejects a frontendDist that cannot be made relative to src-tauri",
+    () => {
+      expect(() =>
+        toTauriOverlayFrontendDist("D:/outside/client", "C:/repo/apps/desktop/src-tauri/stage"),
+      ).toThrow(
+        expect.objectContaining({
+          name: "TauriArtifactError",
+          code: "frontend-dist-not-relative",
+        }),
+      );
+    },
+  );
 
   it("puts the pinned Node directory first even when the executable is already named node", async () => {
     const nodeExecutable = NodePath.join("C:/bundled-runtime", "node.exe");

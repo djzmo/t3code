@@ -158,6 +158,7 @@ describe("DesktopBackendConfiguration", () => {
   it.effect("resolvePrimary starts from server.asar without materializing the WSL tree", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3-desktop-backend-config-test-",
       });
@@ -191,7 +192,10 @@ describe("DesktopBackendConfiguration", () => {
         ),
       );
 
-      assert.equal(config.entryPath, `${resourcesPath}/server.asar/apps/server/dist/bin.mjs`);
+      assert.equal(
+        config.entryPath,
+        path.join(resourcesPath, "server.asar", "apps", "server", "dist", "bin.mjs"),
+      );
       assert.equal(config.env.ELECTRON_RUN_AS_NODE, "1");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
@@ -553,6 +557,37 @@ describe("DesktopBackendConfiguration", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("resolvePrimary uses stdin bootstrap delivery on Windows without telemetry fds", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-desktop-backend-config-test-",
+      });
+
+      yield* Effect.gen(function* () {
+        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+        const config = yield* configuration.resolvePrimary;
+
+        assert.equal(config.bootstrapDelivery, "stdin");
+        const bootstrapFdIndex = config.args.indexOf("--bootstrap-fd");
+        assert.isAtLeast(bootstrapFdIndex, 0);
+        assert.equal(config.args[bootstrapFdIndex + 1], "0");
+        assert.notProperty(config.bootstrap, "desktopTelemetryFd");
+        assert.notProperty(config.bootstrap, "desktopTelemetryControlFd");
+      }).pipe(
+        Effect.provide(
+          DesktopBackendConfiguration.layer.pipe(
+            Layer.provideMerge(serverExposureLayer),
+            Layer.provideMerge(DesktopAppSettings.layerTest()),
+            Layer.provideMerge(DesktopWslServerTree.layerTest()),
+            Layer.provideMerge(DesktopWslEnvironment.layerTest()),
+            Layer.provideMerge(makeEnvironmentLayer(baseDir, { platform: "win32" })),
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect(
     "resolvePrimary falls back to the Windows primary when wsl-only but WSL is unavailable",
     () =>
@@ -815,6 +850,7 @@ describe("DesktopBackendConfiguration", () => {
   it.effect("prefers the external packaged resource monitor over the copy inside the asar", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3-desktop-backend-config-test-",
       });
@@ -836,7 +872,14 @@ describe("DesktopBackendConfiguration", () => {
       yield* Effect.gen(function* () {
         const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
         const config = yield* configuration.resolvePrimary;
-        assert.equal(config.bootstrap.resourceMonitorPath, monitorPath);
+        assert.equal(
+          config.bootstrap.resourceMonitorPath,
+          path.join(resourcesPath, "resource-monitor", "t3-resource-monitor"),
+        );
+        assert.equal(config.bootstrapDelivery, "fd3");
+        const bootstrapFdIndex = config.args.indexOf("--bootstrap-fd");
+        assert.isAtLeast(bootstrapFdIndex, 0);
+        assert.equal(config.args[bootstrapFdIndex + 1], "3");
         assert.equal(config.bootstrap.desktopTelemetryFd, 4);
         assert.equal(config.bootstrap.desktopTelemetryControlFd, 5);
       }).pipe(
