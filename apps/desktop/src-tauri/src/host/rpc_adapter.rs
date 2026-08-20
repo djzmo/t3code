@@ -609,16 +609,16 @@ mod tests {
     }
 
     fn wait_for_process_exit(adapter: &mut RpcProcessBroker) {
-        for _ in 0..8 {
-            let event = adapter
-                .next_event()
-                .expect("fixture emits terminal events")
-                .expect("event maps to RPC");
-            if matches!(event.params, Some(RpcParams::ProcessExit(_))) {
-                return;
+        loop {
+            match adapter.next_event() {
+                Some(Ok(event)) if matches!(event.params, Some(RpcParams::ProcessExit(_))) => {
+                    return;
+                }
+                Some(Ok(_)) => {}
+                Some(Err(error)) => panic!("fixture event error: {error}"),
+                None => panic!("event queue closed without process exit"),
             }
         }
-        panic!("expected a process exit event");
     }
 
     #[test]
