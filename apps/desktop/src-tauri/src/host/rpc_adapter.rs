@@ -595,6 +595,32 @@ mod tests {
         }
     }
 
+    /// Long enough that spawn can commit a registration before the child exits.
+    /// `/bin/true` and `cmd /C exit 0` can finish first and return a null token.
+    fn short_lived_registered_params() -> ProcessSpawnParams {
+        #[cfg(windows)]
+        {
+            params("ping", &["127.0.0.1", "-n", "2"])
+        }
+        #[cfg(not(windows))]
+        {
+            params("sleep", &["1"])
+        }
+    }
+
+    fn wait_for_process_exit(adapter: &mut RpcProcessBroker) {
+        for _ in 0..8 {
+            let event = adapter
+                .next_event()
+                .expect("fixture emits terminal events")
+                .expect("event maps to RPC");
+            if matches!(event.params, Some(RpcParams::ProcessExit(_))) {
+                return;
+            }
+        }
+        panic!("expected a process exit event");
+    }
+
     #[test]
     fn maps_each_rpc_stream_mode_independently() {
         let mut null_stream = params("ignored", &[]);
@@ -756,27 +782,20 @@ mod tests {
 
     #[test]
     fn releases_exact_registration_once_after_exit_event() {
-        #[cfg(windows)]
-        let request = params("cmd", &["/D", "/C", "exit", "0"]);
-        #[cfg(not(windows))]
-        let request = params("true", &[]);
-
         let mut adapter = RpcProcessBroker::new(ProcessBroker::for_tests(
             BrokerConfig::default(),
             crate::host::identity::NativeIdentityBackend,
         ));
-        let spawned = adapter.spawn(request).expect("fixture process spawns");
+        let spawned = adapter
+            .spawn(short_lived_registered_params())
+            .expect("fixture process spawns");
         let registration_id = spawned
             .registration_id
             .0
             .clone()
             .expect("fixture remains registered");
 
-        let event = adapter
-            .next_event()
-            .expect("fixture emits an exit")
-            .expect("exit maps to RPC");
-        assert!(matches!(event.params, Some(RpcParams::ProcessExit(_))));
+        wait_for_process_exit(&mut adapter);
 
         let params = ProcessTokenParams {
             process_id: spawned.process_id.clone(),
@@ -794,26 +813,19 @@ mod tests {
 
     #[test]
     fn rejects_wrong_registration_for_exited_process() {
-        #[cfg(windows)]
-        let request = params("cmd", &["/D", "/C", "exit", "0"]);
-        #[cfg(not(windows))]
-        let request = params("true", &[]);
-
         let mut adapter = RpcProcessBroker::new(ProcessBroker::for_tests(
             BrokerConfig::default(),
             crate::host::identity::NativeIdentityBackend,
         ));
-        let spawned = adapter.spawn(request).expect("fixture process spawns");
+        let spawned = adapter
+            .spawn(short_lived_registered_params())
+            .expect("fixture process spawns");
         let registration_id = spawned
             .registration_id
             .0
             .expect("fixture remains registered");
 
-        let event = adapter
-            .next_event()
-            .expect("fixture emits an exit")
-            .expect("exit maps to RPC");
-        assert!(matches!(event.params, Some(RpcParams::ProcessExit(_))));
+        wait_for_process_exit(&mut adapter);
 
         assert_eq!(
             adapter.release(ProcessTokenParams {
