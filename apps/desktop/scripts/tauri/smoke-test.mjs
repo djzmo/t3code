@@ -97,6 +97,8 @@ const parseArguments = (argumentsList) => {
   return options;
 };
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const killCapturedProcess = (child, signal) => {
   const pid = child.pid;
   if (!pid) return;
@@ -119,16 +121,18 @@ const killCapturedProcess = (child, signal) => {
   }
 };
 
-const runSmoke = async (options) => {
+export const runSmoke = async (options, dependencies = {}) => {
+  const spawn = dependencies.spawn ?? NodeChildProcess.spawn;
+  const fileSystem = dependencies.fileSystem ?? NodeFS;
   const configuredSmokeHome = process.env.AGENT_NANONI_SMOKE_HOME;
   const smokeHome =
     configuredSmokeHome ??
-    (await NodeFS.mkdtemp(NodePath.join(NodeOS.tmpdir(), "agent-nanoni-smoke-")));
+    (await fileSystem.mkdtemp(NodePath.join(NodeOS.tmpdir(), "agent-nanoni-smoke-")));
   try {
     const packagedServerEntry = packagedServerEntryFromBundle(options.binary);
     if (packagedServerEntry !== undefined) {
       try {
-        await NodeFS.access(packagedServerEntry);
+        await fileSystem.access(packagedServerEntry);
       } catch {
         throw new Error(
           `Tauri smoke bundle is missing the packaged server entry: ${packagedServerEntry}`,
@@ -136,9 +140,9 @@ const runSmoke = async (options) => {
       }
     }
     const output = [];
-    let exited = false;
+    let closed = false;
     let spawnError = null;
-    const child = NodeChildProcess.spawn(options.binary, options.childArguments, {
+    const child = spawn(options.binary, options.childArguments, {
       cwd: options.cwd,
       detached: process.platform !== "win32",
       // CREATE_NO_WINDOW can prevent WebView2 from initializing JS on Windows.
@@ -161,51 +165,59 @@ const runSmoke = async (options) => {
     child.stderr.on("data", append);
     child.once("error", (error) => {
       spawnError = error;
-      exited = true;
+      closed = true;
     });
 
     let ready = false;
     let exitCode = null;
     let exitSignal = null;
-    const exitedPromise = new Promise((resolve) => {
-      child.once("exit", (code, signal) => {
-        exited = true;
-        exitCode = code;
-        exitSignal = signal;
+    const closedPromise = new Promise((resolve) => {
+      child.once("close", (code, signal) => {
+        closed = true;
+        if (exitCode === null) exitCode = code;
+        if (exitSignal === null) exitSignal = signal;
         resolve();
       });
     });
+    child.once("exit", (code, signal) => {
+      exitCode = code;
+      exitSignal = signal;
+    });
+    const snapshotReady = () => hasRequiredSmokeReadiness(output.join(""), options.readyPattern);
     const startedAt = Date.now();
-    while (!ready && !exited && Date.now() - startedAt < options.timeoutMs) {
-      ready = hasRequiredSmokeReadiness(output.join(""), options.readyPattern);
-      if (!ready) await new Promise((resolve) => setTimeout(resolve, 50));
+    while (!ready && !closed && Date.now() - startedAt < options.timeoutMs) {
+      ready = snapshotReady();
+      if (!ready) await sleep(50);
     }
-    // Exit can beat the next 50ms poll, and Node can deliver the last
-    // stdout/stderr chunks after the `exit` event. Re-read the captured
-    // buffer (and give the event loop one turn) before declaring unreadiness.
+    // `exit` can beat the next poll, and last stdout/stderr `data` can land
+    // after `exit`. `close` is the stdio-complete barrier; re-read the buffer
+    // after it, and again after any async diagnostics, before throwing.
     if (!ready) {
-      await new Promise((resolve) => setImmediate(resolve));
-      ready = hasRequiredSmokeReadiness(output.join(""), options.readyPattern);
+      if (!closed) await Promise.race([closedPromise, sleep(100)]);
+      ready = snapshotReady();
     }
 
     if (!ready) {
       killCapturedProcess(child, "SIGTERM");
-      await Promise.race([exitedPromise, new Promise((resolve) => setTimeout(resolve, 2_000))]);
-      const diagnostics = await readSmokeHomeDiagnostics(smokeHome);
-      throw new Error(
-        spawnError !== null
-          ? `Tauri smoke process failed to start: ${spawnError.message}\n${diagnostics}`
-          : `Tauri smoke did not reach backend readiness within ${options.timeoutMs}ms.\n${output.join("")}\n${diagnostics}`,
-      );
+      await Promise.race([closedPromise, sleep(2_000)]);
+      const diagnostics = await readSmokeHomeDiagnostics(smokeHome, fileSystem);
+      ready = snapshotReady();
+      if (!ready) {
+        throw new Error(
+          spawnError !== null
+            ? `Tauri smoke process failed to start: ${spawnError.message}\n${diagnostics}`
+            : `Tauri smoke did not reach backend readiness within ${options.timeoutMs}ms.\n${output.join("")}\n${diagnostics}`,
+        );
+      }
     }
 
     // The app consumes the smoke environment only after backend readiness. The
     // normal path asks the lifecycle to exit cleanly; the forced path kills only
     // the retained host child and lets the shell prove managed-child cleanup.
-    await Promise.race([exitedPromise, new Promise((resolve) => setTimeout(resolve, 10_000))]);
-    if (!exited) {
+    await Promise.race([closedPromise, sleep(10_000)]);
+    if (!closed) {
       killCapturedProcess(child, "SIGKILL");
-      const diagnostics = await readSmokeHomeDiagnostics(smokeHome);
+      const diagnostics = await readSmokeHomeDiagnostics(smokeHome, fileSystem);
       throw new Error(
         `Tauri smoke process did not exit after readiness (pid ${child.pid ?? "?"}).\n${output.join("")}\n${diagnostics}`,
       );
@@ -229,7 +241,7 @@ const runSmoke = async (options) => {
     );
   } finally {
     if (configuredSmokeHome === undefined) {
-      await NodeFS.rm(smokeHome, { recursive: true, force: true });
+      await fileSystem.rm(smokeHome, { recursive: true, force: true });
     }
   }
 };
