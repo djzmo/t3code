@@ -51,6 +51,9 @@ use tauri_plugin_opener::OpenerExt;
 const SIDE_CAR_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const SIDE_CAR_DEEP_LINK_SCHEME: &str = "agent-nanoni";
 const SIDE_CAR_TAURI_VERSION: &str = "2.11.5";
+/// Packaged smoke waits 10s after readiness.  Arm this sooner so a stuck
+/// broker close cannot keep the process alive after first-roundtrip.
+const SMOKE_EXIT_WATCHDOG: Duration = Duration::from_secs(3);
 
 type AppEventDispatcher = dyn Fn(AppEvent) -> Result<AppTransition, String> + Send + Sync + 'static;
 
@@ -210,6 +213,15 @@ impl BridgeRuntime {
                     }
                 } else {
                     eprintln!("AGENT_NANONI_SMOKE clean-exit-requested");
+                    // Broker teardown runs while the dispatcher lock is held.
+                    // If that path blocks, the lifecycle never reaches `app.exit`.
+                    let _ = thread::Builder::new()
+                        .name("nanoni-smoke-watchdog".to_owned())
+                        .spawn(|| {
+                            thread::sleep(SMOKE_EXIT_WATCHDOG);
+                            eprintln!("AGENT_NANONI_SMOKE watchdog-exit");
+                            std::process::exit(0);
+                        });
                     if let Err(error) = runtime
                         .dispatch_app_event(AppEvent::Host(HostNotification::Exit { code: 0 }))
                     {
@@ -644,12 +656,12 @@ impl<R: tauri::Runtime> ShellPlatform for TauriShellPlatform<R> {
                 thread::Builder::new()
                     .name("nanoni-lifecycle-continuation".to_owned())
                     .spawn(move || match continuation {
-                        Continuation::Exit(code) => app.exit(code),
-                        Continuation::Restart if tauri::is_dev() => app.exit(75),
+                        Continuation::Exit(code) => request_app_exit(&app, code),
+                        Continuation::Restart if tauri::is_dev() => request_app_exit(&app, 75),
                         Continuation::Restart => app.request_restart(),
                         Continuation::Install => {
                             eprintln!("updater installation is unavailable in Phase 0");
-                            app.exit(1);
+                            request_app_exit(&app, 1);
                         }
                     })
                     .map(|_| ())
@@ -1243,6 +1255,13 @@ fn run_event<R: tauri::Runtime>(
     }
 }
 
+fn request_app_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>, code: i32) {
+    let handle = app.clone();
+    if app.run_on_main_thread(move || handle.exit(code)).is_err() {
+        app.exit(code);
+    }
+}
+
 fn native_exit_event(code: Option<i32>, has_no_windows: bool) -> NativeEvent {
     if code.is_none() && has_no_windows {
         NativeEvent::LastWindowClosed
@@ -1349,8 +1368,8 @@ mod tests {
     #[cfg(windows)]
     use super::sidecar_compatible_path;
     use super::{
-        SMOKE_ROUNDTRIP_INIT_SCRIPT, native_exit_event, topology_a_benchmark_enabled,
-        transition_prevents_exit,
+        SMOKE_EXIT_WATCHDOG, SMOKE_ROUNDTRIP_INIT_SCRIPT, native_exit_event,
+        topology_a_benchmark_enabled, transition_prevents_exit,
     };
 
     #[test]
@@ -1446,6 +1465,12 @@ mod tests {
             effects: Vec::new(),
         };
         assert!(!transition_prevents_exit(&authorized));
+    }
+
+    #[test]
+    fn smoke_exit_watchdog_is_shorter_than_the_harness_wait() {
+        assert!(SMOKE_EXIT_WATCHDOG < std::time::Duration::from_secs(10));
+        assert!(SMOKE_EXIT_WATCHDOG >= std::time::Duration::from_secs(1));
     }
 
     #[cfg(windows)]

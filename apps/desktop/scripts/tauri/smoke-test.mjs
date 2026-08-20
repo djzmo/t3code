@@ -199,8 +199,9 @@ const runSmoke = async (options) => {
     await Promise.race([exitedPromise, new Promise((resolve) => setTimeout(resolve, 10_000))]);
     if (!exited) {
       killCapturedProcess(child, "SIGKILL");
+      const diagnostics = await readSmokeHomeDiagnostics(smokeHome);
       throw new Error(
-        `Tauri smoke process did not exit after readiness (pid ${child.pid ?? "?"}).`,
+        `Tauri smoke process did not exit after readiness (pid ${child.pid ?? "?"}).\n${output.join("")}\n${diagnostics}`,
       );
     }
 

@@ -170,6 +170,7 @@ describe("Tauri artifact orchestration", () => {
     expect(withLinuxAppImageExtractAndRun("linux", { PATH: "/usr/bin" })).toEqual({
       PATH: "/usr/bin",
       APPIMAGE_EXTRACT_AND_RUN: "1",
+      NO_STRIP: "1",
     });
     expect(withLinuxAppImageExtractAndRun("mac", { PATH: "/usr/bin" })).toEqual({
       PATH: "/usr/bin",

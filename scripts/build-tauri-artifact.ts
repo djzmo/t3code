@@ -711,12 +711,15 @@ export const resolveTauriBuildArguments = (
   configOverlayPath,
 ];
 
-/** linuxdeploy is itself an AppImage; CI runners often lack FUSE. */
+/** linuxdeploy is itself an AppImage; CI runners often lack FUSE.
+ *  Its bundled `strip` also rejects modern ELF `.relr.dyn` sections. */
 export const withLinuxAppImageExtractAndRun = (
   platform: TauriArtifactPlatform,
   environment: Readonly<Record<string, string>>,
 ): Readonly<Record<string, string>> =>
-  platform === "linux" ? { ...environment, APPIMAGE_EXTRACT_AND_RUN: "1" } : environment;
+  platform === "linux"
+    ? { ...environment, APPIMAGE_EXTRACT_AND_RUN: "1", NO_STRIP: "1" }
+    : environment;
 
 export const resolvePinnedNodeEnvironment = async (
   rootDir: string,

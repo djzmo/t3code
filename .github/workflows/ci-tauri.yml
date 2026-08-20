@@ -229,6 +229,7 @@ jobs:
         shell: bash
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
+          NO_STRIP: "1"
         run: >-
           node scripts/build-tauri-artifact.ts
           --platform ${{ matrix.platform }}

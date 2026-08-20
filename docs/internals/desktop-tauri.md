@@ -31,8 +31,15 @@ omitted. Unix primary keeps fd 3 plus optional fd 4/fd 5.
 
 Linux AppImage bundling runs linuxdeploy as an AppImage. The unsigned artifact
 build and AppImage smoke inherit `APPIMAGE_EXTRACT_AND_RUN=1` so linuxdeploy can
-start on CI runners that do not provide FUSE. Do not treat a passing compile as
-AppImage evidence until that bundle exists.
+start on CI runners that do not provide FUSE, and `NO_STRIP=1` so linuxdeploy's
+bundled `strip` does not reject modern ELF `.relr.dyn` sections. Do not treat a
+passing compile as AppImage evidence until that bundle exists.
+
+Packaged macOS smoke previously reached `backend-ready` and `first-roundtrip`
+then stayed alive: host `app.exit` applies managed-child cleanup while the
+dispatcher lock is held, and a stuck close never reached `app.exit`. Clean
+smoke now posts exit on the GUI thread and arms a 3s `process::exit(0)`
+watchdog after first-roundtrip. Forced-host smoke does not use that watchdog.
 
 The packaged server closure always uses a hoisted `node_modules` tree. Isolated
 pnpm layouts are symlink farms; copying them into a macOS `.app` drops

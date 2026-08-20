@@ -331,7 +331,14 @@ impl<P: ShellPlatform> ShellDispatcher<P> {
                     // the operation one-shot even if a platform callback
                     // re-enters the dispatcher while cleanup is in progress.
                     self.broker_cleanup_applied = true;
-                    self.broker.transport_close().map_err(adapter_error)?;
+                    if let Err(error) = self.broker.transport_close() {
+                        // An authorized `Run`/`PassThrough` still has to fire.
+                        // Aborting here left packaged macOS smoke stuck after
+                        // first-roundtrip when group cleanup failed or blocked.
+                        eprintln!(
+                            "managed-child cleanup failed; continuing authorized exit: {error}"
+                        );
+                    }
                 }
                 let residue = self.feed_residue_terminated()?;
                 state = residue.state;
@@ -1121,6 +1128,31 @@ mod tests {
         assert_eq!(
             app_effects(&dispatch),
             &[AppEffect::Run(Continuation::Exit(75))]
+        );
+        assert!(dispatch.broker_cleanup_applied());
+    }
+
+    #[test]
+    fn app_exit_still_runs_after_cleanup_has_already_been_applied() {
+        let mut dispatch = dispatcher();
+        dispatch
+            .transport_close()
+            .expect("empty broker cleanup should succeed");
+        dispatch
+            .notification(notification(
+                RpcMethod::AppExit,
+                Some(RpcParams::AppExit(AppExitParams { code: 0 })),
+            ))
+            .expect("authorized exit must still run after cleanup");
+        assert_eq!(
+            dispatch.app_state(),
+            State::ExitAuthorized {
+                continuation: Continuation::Exit(0),
+            }
+        );
+        assert_eq!(
+            app_effects(&dispatch),
+            &[AppEffect::Run(Continuation::Exit(0))]
         );
         assert!(dispatch.broker_cleanup_applied());
     }
