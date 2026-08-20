@@ -503,6 +503,25 @@ const pruneInstall = async (installRoot: string, platform: Platform, arch: Arch)
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
   }
+  await pruneMuslNatives(modules);
+};
+
+const pruneMuslNatives = async (directory: string): Promise<void> => {
+  let entries;
+  try {
+    entries = await NodeFS.readdir(directory, { withFileTypes: true });
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw cause;
+  }
+  for (const entry of entries) {
+    const path = NodePath.join(directory, entry.name);
+    if (entry.name.includes(".musl.") || entry.name.endsWith("-musl")) {
+      await NodeFS.rm(path, { recursive: true, force: true });
+      continue;
+    }
+    if (entry.isDirectory()) await pruneMuslNatives(path);
+  }
 };
 
 const assertInstalledDependencies = async (

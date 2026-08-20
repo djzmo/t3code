@@ -229,6 +229,46 @@ describe("buildTauriServerClosure", () => {
     expect(generatedWorkspace?.nodeLinker).toBe("hoisted");
   });
 
+  it("prunes musl native addons that linuxdeploy cannot ldd on glibc", async () => {
+    const fixture = await makeFixture();
+    const result = await buildTauriServerClosure({
+      rootDir: fixture.root,
+      outputRoot: fixture.output,
+      temporaryRoot: fixture.temporaryRoot,
+      platform: "linux",
+      arch: "x64",
+      runCommand: async (input) => {
+        await writeInstall(input.targetDir);
+        const nativeDir = NodePath.join(
+          input.targetDir,
+          "node_modules/@msgpackr-extract/msgpackr-extract-linux-x64",
+        );
+        await NodeFS.mkdir(nativeDir, { recursive: true });
+        await NodeFS.writeFile(NodePath.join(nativeDir, "node.abi115.node"), "gnu\n");
+        await NodeFS.writeFile(NodePath.join(nativeDir, "node.abi115.musl.node"), "musl\n");
+        return { exitCode: 0 };
+      },
+    });
+
+    await expect(
+      NodeFS.readFile(
+        NodePath.join(
+          result.nodeModulesPath,
+          "@msgpackr-extract/msgpackr-extract-linux-x64/node.abi115.node",
+        ),
+        "utf8",
+      ),
+    ).resolves.toBe("gnu\n");
+    await expect(
+      NodeFS.access(
+        NodePath.join(
+          result.nodeModulesPath,
+          "@msgpackr-extract/msgpackr-extract-linux-x64/node.abi115.musl.node",
+        ),
+      ),
+    ).rejects.toThrow();
+  });
+
   it("prunes non-target node-pty prebuilds", async () => {
     const fixture = await makeFixture();
     const result = await buildTauriServerClosure({

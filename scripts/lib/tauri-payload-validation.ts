@@ -91,7 +91,8 @@ export class TauriPayloadValidationError extends Error {
     | "invalid-input"
     | "command-failed"
     | "native-load-failed"
-    | "electron-import";
+    | "electron-import"
+    | "musl-native";
   readonly operation?: "server-version" | "fff-native-load" | undefined;
   readonly commandResult?: TauriPayloadValidationCommandResult | undefined;
   readonly matches?: ReadonlyArray<string> | undefined;
@@ -254,6 +255,21 @@ const isolatedEnvironment = (): NodeJS.ProcessEnv => {
   return environment;
 };
 
+const assertNoMuslNatives = async (directory: string): Promise<void> => {
+  const entries = await NodeFS.readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    const path = NodePath.join(directory, entry.name);
+    if (entry.name.includes(".musl.") || entry.name.endsWith("-musl")) {
+      throw new TauriPayloadValidationError(
+        "musl-native",
+        `Staged payload contains a musl native that linuxdeploy cannot ldd on glibc: ${path}`,
+        { matches: [path] },
+      );
+    }
+    if (entry.isDirectory()) await assertNoMuslNatives(path);
+  }
+};
+
 const assertNoAncestorNodeModules = async (path: string): Promise<void> => {
   let parent = NodePath.dirname(path);
   for (;;) {
@@ -310,6 +326,8 @@ export const validateTauriPayload = async (
       { matches: electronImports },
     );
   }
+
+  await assertNoMuslNatives(stageRoot);
 
   const runCommand = options.runCommand ?? defaultCommandRunner;
   // On Windows the user profile can itself contain node_modules. Put the

@@ -35,10 +35,13 @@ start on CI runners that do not provide FUSE, and `NO_STRIP=1` so linuxdeploy's
 bundled `strip` does not reject modern ELF `.relr.dyn` sections. The Linux
 bundle overlay sets `productName` to the D-ID executable name `AgentNanoni`
 because linuxdeploy still fails on the display name's space after `NO_STRIP`.
-Windows and macOS keep the display name `Agent Nanoni`. Linux `tauri build`
-also passes `--verbose` so a remaining linuxdeploy failure prints its command
-output. Do not treat a passing compile as AppImage evidence until that bundle
-exists.
+The staged server closure also deletes musl natives (`*.musl.node`, `*-musl`
+packages); linuxdeploy runs `ldd` on every ELF under the AppDir and musl
+addons fail that on glibc runners. Payload validation rejects any musl native
+that survives prune. Windows and macOS keep the display name `Agent Nanoni`.
+Linux `tauri build` also passes `--verbose` so a remaining linuxdeploy failure
+prints its command output. Do not treat a passing compile as AppImage evidence
+until that bundle exists.
 
 Packaged macOS smoke previously reached `backend-ready` and `first-roundtrip`
 then stayed alive: host `app.exit` applies managed-child cleanup while the

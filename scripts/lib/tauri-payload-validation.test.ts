@@ -177,6 +177,28 @@ describe("validateTauriPayload", () => {
     ).rejects.toMatchObject({ code: "electron-import" });
   });
 
+  it("rejects musl native addons that linuxdeploy cannot ldd on glibc", async () => {
+    const fixture = await makeFixture();
+    const muslPath = NodePath.join(
+      fixture.root,
+      "server/node_modules/@msgpackr-extract/msgpackr-extract-linux-x64/node.abi115.musl.node",
+    );
+    await NodeFS.mkdir(NodePath.dirname(muslPath), { recursive: true });
+    await NodeFS.writeFile(muslPath, "musl\n");
+    let commandStarted = false;
+    await expect(
+      validateTauriPayload({
+        stageRoot: fixture.root,
+        platform: "win",
+        runCommand: async () => {
+          commandStarted = true;
+          return { exitCode: 0 };
+        },
+      }),
+    ).rejects.toMatchObject({ code: "musl-native" });
+    expect(commandStarted).toBe(false);
+  });
+
   it("reports a failed server version command with its captured output", async () => {
     const fixture = await makeFixture();
     await expect(
