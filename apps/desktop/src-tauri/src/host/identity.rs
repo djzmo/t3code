@@ -29,7 +29,7 @@ pub enum IdentityProof {
     /// released. The descriptor is reference counted because the broker
     /// clones [`ProcessIdentity`] while dispatching release/close paths.
     #[cfg(target_os = "linux")]
-    LinuxPidFd { fd: Arc<OwnedFd> },
+    LinuxPidFd { fd: Arc<OwnedFd>, pid: u32 },
     /// macOS process start time returned by `proc_pidinfo`.
     #[cfg(target_os = "macos")]
     MacStartTime { seconds: u64, microseconds: u64 },
@@ -49,9 +49,16 @@ impl PartialEq for IdentityProof {
                 left == right
             }
             #[cfg(target_os = "linux")]
-            (Self::LinuxPidFd { fd: left }, Self::LinuxPidFd { fd: right }) => {
-                std::ptr::eq(left.as_ref(), right.as_ref())
-            }
+            (
+                Self::LinuxPidFd {
+                    fd: left,
+                    pid: left_pid,
+                },
+                Self::LinuxPidFd {
+                    fd: right,
+                    pid: right_pid,
+                },
+            ) => left_pid == right_pid && std::ptr::eq(left.as_ref(), right.as_ref()),
             #[cfg(target_os = "macos")]
             (
                 Self::MacStartTime {
@@ -195,7 +202,10 @@ impl IdentityBackend for NativeIdentityBackend {
             Ok(ProcessIdentity {
                 pid,
                 spawned_at_ms: millis(spawned_at),
-                proof: IdentityProof::LinuxPidFd { fd: Arc::new(fd) },
+                proof: IdentityProof::LinuxPidFd {
+                    fd: Arc::new(fd),
+                    pid,
+                },
             })
         }
 
@@ -247,10 +257,10 @@ impl IdentityBackend for NativeIdentityBackend {
 
         #[cfg(target_os = "linux")]
         {
-            let IdentityProof::LinuxPidFd { fd } = &identity.proof else {
+            let IdentityProof::LinuxPidFd { fd, pid } = &identity.proof else {
                 return Err(IdentityError::Unproven);
             };
-            if child.id() != identity.pid {
+            if child.id() != identity.pid || child.id() != *pid {
                 return Err(IdentityError::Mismatch);
             }
             if child

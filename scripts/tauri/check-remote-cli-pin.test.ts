@@ -616,11 +616,16 @@ describe("remote CLI pin closure", () => {
         "sha512-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB==",
     });
     const git: GitRunner = async (args) => {
-      if (args[0] === "show" && args[1]?.startsWith("HEAD^:")) return previous;
+      if (
+        args[0] === "show" &&
+        args[1]?.includes("apps/desktop/src-tauri/remote-cli.json")
+      ) {
+        return previous;
+      }
       return delegate(args);
     };
     await expect(
-      verifyRemoteCliPin({ rootDir: root, git }),
+      verifyRemoteCliPin({ rootDir: root, git, integrityBaseRef: "HEAD^" }),
     ).rejects.toMatchObject<RemoteCliPinError>({
       code: "integrity-tag-mismatch",
     });

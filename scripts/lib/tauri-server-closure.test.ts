@@ -144,6 +144,8 @@ describe("buildTauriServerClosure", () => {
       rootDir: fixture.root,
       outputRoot: fixture.output,
       temporaryRoot: fixture.temporaryRoot,
+      platform: "win",
+      arch: "x64",
       runCommand: async (input) => {
         invocation = input;
         generatedManifest = JSON.parse(
@@ -204,6 +206,8 @@ describe("buildTauriServerClosure", () => {
       rootDir: fixture.root,
       outputRoot: fixture.output,
       temporaryRoot: fixture.temporaryRoot,
+      platform: "win",
+      arch: "x64",
       runCommand: async (input) => {
         await writeInstall(input.targetDir);
         return { exitCode: 0 };

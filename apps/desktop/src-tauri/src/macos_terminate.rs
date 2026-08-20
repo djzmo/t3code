@@ -112,9 +112,12 @@ fn install_application_should_terminate_hook() -> Result<(), InstallError> {
 )]
 mod imp {
     use std::ffi::CStr;
+    use std::mem;
+    use std::ptr;
 
     use objc2::ffi::class_addMethod;
-    use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
     use objc2::sel;
     use objc2_app_kit::NSApplicationTerminateReply;
 
@@ -123,25 +126,26 @@ mod imp {
     pub(super) fn install_application_should_terminate_hook() -> Result<(), InstallError> {
         let class = delegate_class().ok_or(InstallError::HookFailed)?;
         let selector = sel!(applicationShouldTerminate:);
+        let types = CStr::from_bytes_with_nul(b"Q@:@\0").expect("static method types");
+        let imp = terminate_imp();
         unsafe {
             // `class_addMethod` succeeds only when this class does not already
             // define the selector, including when a parent implements it.
             // tao's `TaoAppDelegateParent` does not, so this is the leaf add.
-            let types = CStr::from_bytes_with_nul(b"Q@:@\0").expect("static method types");
             let added = class_addMethod(
-                class as *mut _,
+                ptr::from_ref(class).cast_mut(),
                 selector,
-                application_should_terminate as Imp,
+                imp,
                 types.as_ptr(),
             );
-            if Bool::new(added).as_bool() {
+            if added.as_bool() {
                 return Ok(());
             }
 
             let method = class
                 .instance_method(selector)
                 .ok_or(InstallError::HookFailed)?;
-            let _previous = method.set_implementation(application_should_terminate as Imp);
+            let _previous = method.set_implementation(imp);
         }
         Ok(())
     }
@@ -153,18 +157,35 @@ mod imp {
         let mtm = MainThreadMarker::new()?;
         let app = NSApplication::sharedApplication(mtm);
         let delegate = app.delegate()?;
-        Some(delegate.class())
+        Some(any_object_class(&delegate))
     }
 
-    extern "C-unwind" fn application_should_terminate(
+    fn any_object_class<T>(retained: &Retained<T>) -> &'static AnyClass {
+        let ptr: *const AnyObject = Retained::as_ptr(retained).cast();
+        // SAFETY: NSApplicationDelegate objects are Objective-C objects.
+        unsafe { (*ptr).class() }
+    }
+
+    fn terminate_imp() -> Imp {
+        // SAFETY: `application_should_terminate` matches Cocoa's
+        // `applicationShouldTerminate:` encoding (`Q@:@`).
+        unsafe {
+            mem::transmute::<
+                unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject) -> usize,
+                Imp,
+            >(application_should_terminate)
+        }
+    }
+
+    unsafe extern "C-unwind" fn application_should_terminate(
         _this: *mut AnyObject,
         _selector: Sel,
         _sender: *mut AnyObject,
     ) -> usize {
         let prevent = HANDLER.get().map(|handler| handler()).unwrap_or(true);
         match terminate_reply_for_prevent(prevent) {
-            TerminateReply::Cancel => NSApplicationTerminateReply::TerminateCancel.0 as usize,
-            TerminateReply::Now => NSApplicationTerminateReply::TerminateNow.0 as usize,
+            TerminateReply::Cancel => NSApplicationTerminateReply::TerminateCancel.0,
+            TerminateReply::Now => NSApplicationTerminateReply::TerminateNow.0,
         }
     }
 }
