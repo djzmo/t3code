@@ -34,6 +34,10 @@ build and AppImage smoke inherit `APPIMAGE_EXTRACT_AND_RUN=1` so linuxdeploy can
 start on CI runners that do not provide FUSE. Do not treat a passing compile as
 AppImage evidence until that bundle exists.
 
+The packaged server closure always uses a hoisted `node_modules` tree. Isolated
+pnpm layouts are symlink farms; copying them into a macOS `.app` drops
+`@ff-labs/fff-node` and the Node host exits `code=1` before backend-ready.
+
 Packaged debug smokes on 2026-08-20 (exe SHA-256
 `e42aeed75c3e79d84a65ea72b30d21a06919442d3fe6637f3678df7d79001dc8`):
 

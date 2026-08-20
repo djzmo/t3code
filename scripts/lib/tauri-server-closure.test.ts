@@ -68,6 +68,7 @@ const makeFixture = async () => {
           },
         },
         packages: {
+          "@ff-labs/fff-bin-darwin-arm64@0.9.4": {},
           "@ff-labs/fff-bin-linux-x64-gnu@0.9.4": {},
           "@ff-labs/fff-bin-linux-x64-musl@0.9.4": {},
           "@ff-labs/fff-bin-win32-x64@0.9.4": {},
@@ -76,6 +77,7 @@ const makeFixture = async () => {
           "node-pty@1.1.0": {},
         },
         snapshots: {
+          "@ff-labs/fff-bin-darwin-arm64@0.9.4": {},
           "@ff-labs/fff-bin-linux-x64-gnu@0.9.4": {},
           "@ff-labs/fff-bin-linux-x64-musl@0.9.4": {},
           "@ff-labs/fff-bin-win32-x64@0.9.4": {},
@@ -140,6 +142,8 @@ describe("buildTauriServerClosure", () => {
         }
       | undefined;
 
+    let generatedWorkspace: { nodeLinker?: string } | undefined;
+
     const result = await buildTauriServerClosure({
       rootDir: fixture.root,
       outputRoot: fixture.output,
@@ -154,6 +158,9 @@ describe("buildTauriServerClosure", () => {
         generatedLock = parseYaml(
           await NodeFS.readFile(NodePath.join(input.targetDir, "pnpm-lock.yaml"), "utf8"),
         ) as typeof generatedLock;
+        generatedWorkspace = parseYaml(
+          await NodeFS.readFile(NodePath.join(input.targetDir, "pnpm-workspace.yaml"), "utf8"),
+        ) as typeof generatedWorkspace;
         await writeInstall(input.targetDir);
         return { exitCode: 0, stdout: "installed\n" };
       },
@@ -176,6 +183,7 @@ describe("buildTauriServerClosure", () => {
       version: "1.1.0",
     });
     expect(generatedLock).not.toHaveProperty("catalogs");
+    expect(generatedWorkspace?.nodeLinker).toBe("hoisted");
     expect(result.entryPath).toBe(NodePath.join(fixture.output, TAURI_SERVER_ENTRY));
     expect(result.nodeModulesPath).toBe(NodePath.join(fixture.output, "node_modules"));
     expect(result.packageJsonPath).toBe(NodePath.join(fixture.output, "package.json"));
@@ -197,6 +205,28 @@ describe("buildTauriServerClosure", () => {
       NodeFS.access(NodePath.join(fixture.output, "node_modules/.bin")),
     ).rejects.toThrow();
     await expect(NodeFS.access(fixture.temporaryRoot)).rejects.toThrow();
+  });
+
+  it("hoists the macOS closure so packaged Node can resolve @ff-labs/fff-node", async () => {
+    const fixture = await makeFixture();
+    let generatedWorkspace: { nodeLinker?: string } | undefined;
+
+    await buildTauriServerClosure({
+      rootDir: fixture.root,
+      outputRoot: fixture.output,
+      temporaryRoot: fixture.temporaryRoot,
+      platform: "mac",
+      arch: "arm64",
+      runCommand: async (input) => {
+        generatedWorkspace = parseYaml(
+          await NodeFS.readFile(NodePath.join(input.targetDir, "pnpm-workspace.yaml"), "utf8"),
+        ) as typeof generatedWorkspace;
+        await writeInstall(input.targetDir);
+        return { exitCode: 0 };
+      },
+    });
+
+    expect(generatedWorkspace?.nodeLinker).toBe("hoisted");
   });
 
   it("prunes non-target node-pty prebuilds", async () => {

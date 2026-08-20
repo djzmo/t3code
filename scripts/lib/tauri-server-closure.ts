@@ -634,14 +634,20 @@ export const buildTauriServerClosure = async (
     selectedPatches,
     overrides,
   );
-  const workspaceConfig = createStageWorkspaceConfig({
-    platform,
-    arch,
-    allowBuilds: recordOfBooleans(workspace.allowBuilds),
-    patchedDependencies: selectedPatches,
-    overrides,
-    linuxServerBackend: platform === "win",
-  });
+  const workspaceConfig = {
+    ...createStageWorkspaceConfig({
+      platform,
+      arch,
+      allowBuilds: recordOfBooleans(workspace.allowBuilds),
+      patchedDependencies: selectedPatches,
+      overrides,
+      linuxServerBackend: platform === "win",
+    }),
+    // Isolated pnpm layouts are symlink farms. Tauri copies resources into a
+    // .app / AppImage without preserving those links, so @ff-labs/fff-node
+    // disappears at runtime. A hoisted tree is real directories.
+    nodeLinker: "hoisted" as const,
+  };
   const packageJson = {
     name: "agent-nanoni-server-closure",
     version: typeof sourceManifest.version === "string" ? sourceManifest.version : "0.0.0",
