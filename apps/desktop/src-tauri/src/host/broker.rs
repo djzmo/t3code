@@ -220,11 +220,11 @@ impl ExitStatusInfo {
         #[cfg(unix)]
         {
             use std::os::unix::process::ExitStatusExt;
-            return Self {
+            Self {
                 success: status.success(),
                 code: status.code(),
                 signal: status.signal(),
-            };
+            }
         }
         #[cfg(not(unix))]
         {

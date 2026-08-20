@@ -111,7 +111,6 @@ fn install_application_should_terminate_hook() -> Result<(), InstallError> {
     reason = "macOS terminate hook is the only crate-local Objective-C runtime surface"
 )]
 mod imp {
-    use std::ffi::CStr;
     use std::mem;
     use std::ptr;
 
@@ -126,7 +125,7 @@ mod imp {
     pub(super) fn install_application_should_terminate_hook() -> Result<(), InstallError> {
         let class = delegate_class().ok_or(InstallError::HookFailed)?;
         let selector = sel!(applicationShouldTerminate:);
-        let types = CStr::from_bytes_with_nul(b"Q@:@\0").expect("static method types");
+        let types = c"Q@:@";
         let imp = terminate_imp();
         unsafe {
             // `class_addMethod` succeeds only when this class does not already

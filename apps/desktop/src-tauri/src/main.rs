@@ -1339,9 +1339,11 @@ mod tests {
     use agent_nanoni_desktop::lifecycle::{Action, State};
     use serde_json::Value;
 
+    #[cfg(windows)]
+    use super::sidecar_compatible_path;
     use super::{
-        SMOKE_ROUNDTRIP_INIT_SCRIPT, native_exit_event, sidecar_compatible_path,
-        topology_a_benchmark_enabled, transition_prevents_exit,
+        SMOKE_ROUNDTRIP_INIT_SCRIPT, native_exit_event, topology_a_benchmark_enabled,
+        transition_prevents_exit,
     };
 
     #[test]
