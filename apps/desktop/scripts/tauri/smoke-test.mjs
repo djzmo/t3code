@@ -177,9 +177,15 @@ const runSmoke = async (options) => {
     });
     const startedAt = Date.now();
     while (!ready && !exited && Date.now() - startedAt < options.timeoutMs) {
-      const snapshot = output.join("");
-      ready = hasRequiredSmokeReadiness(snapshot, options.readyPattern);
+      ready = hasRequiredSmokeReadiness(output.join(""), options.readyPattern);
       if (!ready) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    // Exit can beat the next 50ms poll, and Node can deliver the last
+    // stdout/stderr chunks after the `exit` event. Re-read the captured
+    // buffer (and give the event loop one turn) before declaring unreadiness.
+    if (!ready) {
+      await new Promise((resolve) => setImmediate(resolve));
+      ready = hasRequiredSmokeReadiness(output.join(""), options.readyPattern);
     }
 
     if (!ready) {

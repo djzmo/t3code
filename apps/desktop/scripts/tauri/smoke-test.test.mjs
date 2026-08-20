@@ -16,6 +16,16 @@ describe("Tauri packaged smoke readiness", () => {
         "AGENT_NANONI_SMOKE backend-ready\nAGENT_NANONI_SMOKE first-roundtrip",
       ),
     ).toBe(true);
+    expect(
+      hasRequiredSmokeReadiness(
+        [
+          "AGENT_NANONI_SMOKE backend-ready",
+          "AGENT_NANONI_SMOKE navigation tauri://localhost",
+          "AGENT_NANONI_SMOKE first-roundtrip",
+          "AGENT_NANONI_SMOKE clean-exit-requested",
+        ].join("\n"),
+      ),
+    ).toBe(true);
   });
 
   it("resolves the staged server entry inside a macOS .app", () => {
