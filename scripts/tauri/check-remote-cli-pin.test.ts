@@ -583,14 +583,14 @@ describe("remote CLI pin closure", () => {
       if (
         args[0] === "cat-file" &&
         args[1] === "-t" &&
-        args[2] === "v0.0.1:apps/server/deleted.ts"
+        args[2] === "deadbeef:apps/server/deleted.ts"
       ) {
         return "blob\n";
       }
       if (args[0] === "ls-tree" && args.includes("apps/server")) {
         return "apps/server/deleted.ts\napps/server/package.json\n";
       }
-      if (args[0] === "show" && args[1] === "v0.0.1:apps/server/deleted.ts") {
+      if (args[0] === "show" && args[1] === "deadbeef:apps/server/deleted.ts") {
         return "export const old = true;\n";
       }
       return delegate(args);

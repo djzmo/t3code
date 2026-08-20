@@ -503,7 +503,7 @@ impl GroupOps for NativeGroupOps {
                 }
             }
             members.sort_unstable();
-            return Ok(members);
+            Ok(members)
         }
         #[cfg(target_os = "macos")]
         {
@@ -514,7 +514,7 @@ impl GroupOps for NativeGroupOps {
                 })
                 .map_err(|error| error.to_string())?;
             members.sort_unstable();
-            return Ok(members);
+            Ok(members)
         }
         #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
         {
@@ -527,7 +527,7 @@ impl GroupOps for NativeGroupOps {
         self.verify_leader(group)?;
         match killpg(group.pgid, Signal::SIGKILL) {
             Ok(()) => Ok(()),
-            Err(error) if error == nix::errno::Errno::ESRCH => Ok(()),
+            Err(nix::errno::Errno::ESRCH) => Ok(()),
             Err(error) => Err(error.to_string()),
         }
     }
@@ -574,11 +574,7 @@ impl ProcessBroker {
     pub fn new(config: BrokerConfig) -> Self {
         #[cfg(unix)]
         {
-            return Self::with_identity_and_group_ops(
-                config,
-                NativeIdentityBackend,
-                NativeGroupOps,
-            );
+            Self::with_identity_and_group_ops(config, NativeIdentityBackend, NativeGroupOps)
         }
         #[cfg(not(unix))]
         {
@@ -593,7 +589,7 @@ impl ProcessBroker {
     {
         #[cfg(unix)]
         {
-            return Self::with_identity_and_group_ops(config, identity, NativeGroupOps);
+            Self::with_identity_and_group_ops(config, identity, NativeGroupOps)
         }
         #[cfg(not(unix))]
         {
@@ -1810,9 +1806,12 @@ pub(crate) fn validate_additional_fds(
 }
 
 #[cfg(unix)]
+type PreparedAdditionalFds = (Vec<FdMapping>, HashMap<u32, File>, Vec<(u32, File)>);
+
+#[cfg(unix)]
 fn prepare_additional_fds(
     additional_fds: &[AdditionalFdSpec],
-) -> Result<(Vec<FdMapping>, HashMap<u32, File>, Vec<(u32, File)>), String> {
+) -> Result<PreparedAdditionalFds, String> {
     let mut mappings = Vec::with_capacity(additional_fds.len());
     let mut inputs = HashMap::new();
     let mut outputs = Vec::new();

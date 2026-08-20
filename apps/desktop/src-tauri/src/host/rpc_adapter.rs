@@ -858,12 +858,10 @@ mod tests {
                     fd,
                     bytes_base64,
                     ..
-                })) if process_id == spawned.process_id => {
-                    if fd == 3 {
-                        saw_extra = true;
-                        assert_eq!(decode_base64(&bytes_base64), Ok(b"extra".to_vec()));
-                        break;
-                    }
+                })) if process_id == spawned.process_id && fd == 3 => {
+                    saw_extra = true;
+                    assert_eq!(decode_base64(&bytes_base64), Ok(b"extra".to_vec()));
+                    break;
                 }
                 _ => {}
             }
@@ -912,12 +910,12 @@ mod tests {
                 bytes_base64,
                 ..
             })) = event.params
+                && process_id == spawned.process_id
+                && fd == 1
             {
-                if process_id == spawned.process_id && fd == 1 {
-                    saw_output = true;
-                    assert_eq!(decode_base64(&bytes_base64), Ok(b"hello".to_vec()));
-                    break;
-                }
+                saw_output = true;
+                assert_eq!(decode_base64(&bytes_base64), Ok(b"hello".to_vec()));
+                break;
             }
         }
         assert!(saw_output);

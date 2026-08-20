@@ -343,13 +343,20 @@ const selectedDependencies = (
       "apps/server must declare @ff-labs/fff-node for the native CLI closure.",
     );
   }
+  const installed = {
+    ...runtime,
+    ...resolveFffNativeDependencies(platform, arch, fffVersion),
+    ...(platform === "win" ? resolveFffNativeDependencies("linux", arch, fffVersion) : {}),
+  };
+  // Stage workspace `libc: ["glibc"]` cannot materialize musl optional bins.
+  for (const dependency of Object.keys(installed)) {
+    if (dependency.startsWith("@ff-labs/fff-bin-") && dependency.endsWith("-musl")) {
+      delete installed[dependency];
+    }
+  }
   return {
     runtime,
-    installed: {
-      ...runtime,
-      ...resolveFffNativeDependencies(platform, arch, fffVersion),
-      ...(platform === "win" ? resolveFffNativeDependencies("linux", arch, fffVersion) : {}),
-    },
+    installed,
   };
 };
 

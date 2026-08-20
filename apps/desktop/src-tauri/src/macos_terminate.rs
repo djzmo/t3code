@@ -160,7 +160,7 @@ mod imp {
         Some(any_object_class(&delegate))
     }
 
-    fn any_object_class<T>(retained: &Retained<T>) -> &'static AnyClass {
+    fn any_object_class<T: objc2::Message>(retained: &Retained<T>) -> &'static AnyClass {
         let ptr: *const AnyObject = Retained::as_ptr(retained).cast();
         // SAFETY: NSApplicationDelegate objects are Objective-C objects.
         unsafe { (*ptr).class() }

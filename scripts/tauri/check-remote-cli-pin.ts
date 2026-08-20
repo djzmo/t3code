@@ -1554,7 +1554,7 @@ export const verifyRemoteCliPin = async (
   await assertIntegrityTagCoupling(pin, remoteCliPath, git, options.integrityBaseRef);
   const tagCommit = await assertTagAndHistory(rootDir, pin.upstreamTag, remote, git);
   const closure = computeServerClosure(rootDir);
-  const changed = await compareClosureToTag(rootDir, pin.upstreamTag, closure, git);
+  const changed = await compareClosureToTag(rootDir, tagCommit, closure, git);
   if (changed.length > 0) {
     throw new RemoteCliPinError(
       "server-closure-diff",

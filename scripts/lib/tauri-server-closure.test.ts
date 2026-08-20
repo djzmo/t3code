@@ -166,7 +166,6 @@ describe("buildTauriServerClosure", () => {
     expect(generatedManifest?.packageManager).toBe("pnpm@11.10.0");
     expect(generatedManifest?.dependencies).toEqual({
       "@ff-labs/fff-bin-linux-x64-gnu": "0.9.4",
-      "@ff-labs/fff-bin-linux-x64-musl": "0.9.4",
       "@ff-labs/fff-bin-win32-x64": "0.9.4",
       "@ff-labs/fff-node": "0.9.4",
       "msgpackr-extract": "3.0.4",
