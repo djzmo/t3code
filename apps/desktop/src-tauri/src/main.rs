@@ -1167,6 +1167,7 @@ fn setup_sidecar<R: tauri::Runtime>(
         if let Some(error) = plan.error {
             eprintln!("native macOS terminate gate failed: {error}");
         }
+        let prevents = plan.prevents_exit();
         if let Some(transition) = plan.transition {
             let terminate_dispatcher = Arc::clone(&terminate_dispatcher);
             thread::spawn(move || match terminate_dispatcher.lock() {
@@ -1182,7 +1183,7 @@ fn setup_sidecar<R: tauri::Runtime>(
                 }
             });
         }
-        plan.prevents_exit()
+        prevents
     }))
     .map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(())

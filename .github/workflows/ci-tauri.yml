@@ -33,8 +33,9 @@ jobs:
         run: |
           node --version | grep -E '^v24\.'
           npm --version | grep -E '^11\.'
-          pnpm --version | grep -Fx '11.10.0'
-          vp --version
+          vp_out="$(vp --version)"
+          printf '%s\n' "$vp_out"
+          printf '%s\n' "$vp_out" | grep -Eq 'pnpm[[:space:]]+v11\.10\.0'
 
       - name: Build server and Tauri host
         run: |
@@ -214,8 +215,9 @@ jobs:
         run: |
           node --version | grep -E '^v24\.'
           npm --version | grep -E '^11\.'
-          pnpm --version | grep -Fx '11.10.0'
-          vp --version
+          vp_out="$(vp --version)"
+          printf '%s\n' "$vp_out"
+          printf '%s\n' "$vp_out" | grep -Eq 'pnpm[[:space:]]+v11\.10\.0'
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
