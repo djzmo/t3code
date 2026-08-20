@@ -22,8 +22,7 @@ export default defineConfig({
   },
   staged: {
     // Formatter only for now — no lint or typecheck on commit.
-    // vp fmt has no Rust parser; a `*` match on `.rs` fails the hook.
-    "*.{cjs,css,html,js,json,jsx,md,mjs,ts,tsx,yml,yaml}": "vp fmt",
+    "*": "vp fmt",
   },
   fmt: {
     ignorePatterns: [
