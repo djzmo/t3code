@@ -69,6 +69,8 @@ export const TAURI_ARTIFACT_VERSION_ENVIRONMENT_KEYS = [
 /** The config is intentionally narrow so base capabilities and windows remain authoritative. */
 export interface TauriConfigOverlay {
   readonly version: string;
+  /** Linux AppImage/linuxdeploy cannot consume the display name's space. */
+  readonly productName?: string;
   readonly build: {
     readonly frontendDist: string;
   };
@@ -326,12 +328,16 @@ export const toTauriOverlayFrontendDist = (frontendDist: string, stageRoot: stri
   return (relative === "" ? "." : relative).split(NodePath.sep).join("/");
 };
 
+export const LINUX_APPIMAGE_PRODUCT_NAME = "AgentNanoni";
+
 export const createTauriConfigOverlay = (input: {
   readonly productVersion: string;
   readonly frontendDist: string;
   readonly stageRoot: string;
+  readonly platform?: TauriArtifactPlatform;
 }): TauriConfigOverlay => ({
   version: input.productVersion,
+  ...(input.platform === "linux" ? { productName: LINUX_APPIMAGE_PRODUCT_NAME } : {}),
   build: { frontendDist: toTauriOverlayFrontendDist(input.frontendDist, input.stageRoot) },
   bundle: {
     // Tauri preserves directory structure for directory mappings. A glob map
@@ -605,6 +611,7 @@ export const buildTauriArtifact = async (
     productVersion: metadata.productVersion,
     frontendDist,
     stageRoot,
+    platform,
   });
   if (dependencies.writeOverlay) {
     await dependencies.writeOverlay(
@@ -701,12 +708,14 @@ export const resolveTauriBuildArguments = (
   tauriCli: string,
   configOverlayPath: string,
   debug: boolean,
+  platform?: TauriArtifactPlatform,
 ): ReadonlyArray<string> => [
   "-e",
   TAURI_CLI_RUNNER,
   tauriCli,
   "build",
   ...(debug ? ["--debug"] : []),
+  ...(platform === "linux" ? ["--verbose"] : []),
   "--config",
   configOverlayPath,
 ];
@@ -916,7 +925,7 @@ const createCliHooks = (options: TauriArtifactCliOptions) => {
   const build: TauriArtifactHook = async (context) => {
     await spawnCommand(
       process.execPath,
-      resolveTauriBuildArguments(tauriCli, context.configOverlayPath, options.debug),
+      resolveTauriBuildArguments(tauriCli, context.configOverlayPath, options.debug, platform),
       {
         cwd: resolveTauriCliCwd(rootDir),
         environment: withLinuxAppImageExtractAndRun(platform, context.environment),

@@ -453,7 +453,18 @@ describe("Tauri artifact orchestration", () => {
       build: { frontendDist: toTauriOverlayFrontendDist("./dist", "./stage") },
       bundle: { createUpdaterArtifacts: false },
     });
+    expect(overlay.productName).toBeUndefined();
     expect(NodePath.isAbsolute(overlay.build.frontendDist)).toBe(false);
+  });
+
+  it("uses the space-free D-ID executable name for Linux AppImage overlays", () => {
+    const overlay = createTauriConfigOverlay({
+      productVersion: "1.2.3",
+      frontendDist: "./dist",
+      stageRoot: "./stage",
+      platform: "linux",
+    });
+    expect(overlay.productName).toBe("AgentNanoni");
   });
 
   it("runs the Tauri CLI from the desktop project directory", () => {
@@ -606,5 +617,11 @@ describe("Tauri artifact orchestration", () => {
   it("builds release artifacts by default and debug artifacts only when requested", () => {
     expect(resolveTauriBuildArguments("tauri.js", "overlay.json", false)).not.toContain("--debug");
     expect(resolveTauriBuildArguments("tauri.js", "overlay.json", true)).toContain("--debug");
+    expect(resolveTauriBuildArguments("tauri.js", "overlay.json", false, "linux")).toContain(
+      "--verbose",
+    );
+    expect(resolveTauriBuildArguments("tauri.js", "overlay.json", false, "win")).not.toContain(
+      "--verbose",
+    );
   });
 });
