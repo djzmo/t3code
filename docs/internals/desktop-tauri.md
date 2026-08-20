@@ -29,6 +29,11 @@ Evidence current on 2026-08-20:
 Windows primary bootstrap is stdin/`--bootstrap-fd 0` with telemetry fds
 omitted. Unix primary keeps fd 3 plus optional fd 4/fd 5.
 
+Linux AppImage bundling runs linuxdeploy as an AppImage. The unsigned artifact
+build and AppImage smoke inherit `APPIMAGE_EXTRACT_AND_RUN=1` so linuxdeploy can
+start on CI runners that do not provide FUSE. Do not treat a passing compile as
+AppImage evidence until that bundle exists.
+
 Packaged debug smokes on 2026-08-20 (exe SHA-256
 `e42aeed75c3e79d84a65ea72b30d21a06919442d3fe6637f3678df7d79001dc8`):
 

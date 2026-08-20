@@ -11,9 +11,44 @@ const desktopDirectory = NodePath.resolve(scriptDirectory, "../..");
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_READY_PATTERN = /(?:backend[ ._-]+ready|shell\.hello|nanoni\.phase0\.echo)/i;
+const SMOKE_HOME_LOG_RELATIVE_PATHS = [
+  "userdata/logs/server-child.log",
+  "userdata/logs/desktop-main.log",
+];
+const SMOKE_HOME_DIAGNOSTIC_BYTES = 64 * 1024;
 
 export const hasRequiredSmokeReadiness = (output, readyPattern = DEFAULT_READY_PATTERN) =>
   readyPattern.test(output) && output.includes("AGENT_NANONI_SMOKE first-roundtrip");
+
+export const packagedServerEntryFromBundle = (binaryPath, platform = process.platform) => {
+  if (platform !== "darwin") return undefined;
+  const macosDirectory = NodePath.dirname(binaryPath);
+  if (NodePath.basename(macosDirectory) !== "MacOS") return undefined;
+  return NodePath.join(
+    macosDirectory,
+    "..",
+    "Resources",
+    "server",
+    "apps",
+    "server",
+    "dist",
+    "bin.mjs",
+  );
+};
+
+export const readSmokeHomeDiagnostics = async (smokeHome, fileSystem = NodeFS) => {
+  const sections = [];
+  for (const relativePath of SMOKE_HOME_LOG_RELATIVE_PATHS) {
+    const path = NodePath.join(smokeHome, relativePath);
+    try {
+      const text = await fileSystem.readFile(path, "utf8");
+      sections.push(`--- ${relativePath} ---\n${text.slice(-SMOKE_HOME_DIAGNOSTIC_BYTES)}`);
+    } catch {
+      sections.push(`--- ${relativePath} ---\n<missing>`);
+    }
+  }
+  return sections.join("\n");
+};
 
 const parseArguments = (argumentsList) => {
   const options = {
@@ -90,6 +125,16 @@ const runSmoke = async (options) => {
     configuredSmokeHome ??
     (await NodeFS.mkdtemp(NodePath.join(NodeOS.tmpdir(), "agent-nanoni-smoke-")));
   try {
+    const packagedServerEntry = packagedServerEntryFromBundle(options.binary);
+    if (packagedServerEntry !== undefined) {
+      try {
+        await NodeFS.access(packagedServerEntry);
+      } catch {
+        throw new Error(
+          `Tauri smoke bundle is missing the packaged server entry: ${packagedServerEntry}`,
+        );
+      }
+    }
     const output = [];
     let exited = false;
     let spawnError = null;
@@ -140,10 +185,11 @@ const runSmoke = async (options) => {
     if (!ready) {
       killCapturedProcess(child, "SIGTERM");
       await Promise.race([exitedPromise, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+      const diagnostics = await readSmokeHomeDiagnostics(smokeHome);
       throw new Error(
         spawnError !== null
-          ? `Tauri smoke process failed to start: ${spawnError.message}`
-          : `Tauri smoke did not reach backend readiness within ${options.timeoutMs}ms.\n${output.join("")}`,
+          ? `Tauri smoke process failed to start: ${spawnError.message}\n${diagnostics}`
+          : `Tauri smoke did not reach backend readiness within ${options.timeoutMs}ms.\n${output.join("")}\n${diagnostics}`,
       );
     }
 

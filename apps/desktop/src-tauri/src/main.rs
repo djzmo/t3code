@@ -1072,14 +1072,21 @@ fn setup_sidecar<R: tauri::Runtime>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (spec, hello) = resolve_sidecar_spec(app).map_err(std::io::Error::other)?;
     if env::var_os("AGENT_NANONI_SMOKE").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        let server_entry = std::path::Path::new(&hello.server_root)
+            .join("apps")
+            .join("server")
+            .join("dist")
+            .join("bin.mjs");
         eprintln!(
-            "AGENT_NANONI_SMOKE sidecar node={} host={} cwd={}",
+            "AGENT_NANONI_SMOKE sidecar node={} host={} cwd={} server_entry={} exists={}",
             spec.node_executable.display(),
             spec.host_script.display(),
             spec.current_dir.as_deref().map_or_else(
                 || "<inherited>".to_owned(),
                 |path| path.display().to_string()
-            )
+            ),
+            server_entry.display(),
+            server_entry.is_file()
         );
     }
     let process_broker = ProcessBroker::new(BrokerConfig::default());

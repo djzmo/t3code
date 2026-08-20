@@ -63,6 +63,16 @@ const makeEnvironmentLayer = (baseDir: string, isDevelopment = true) =>
   );
 
 describe("DesktopObservability", () => {
+  it("mirrors backend child output to the console in development and packaged smoke", () => {
+    assert.equal(DesktopObservability.shouldMirrorBackendOutputToConsole(true, {}), true);
+    assert.equal(DesktopObservability.shouldMirrorBackendOutputToConsole(false, {}), false);
+    assert.equal(
+      DesktopObservability.shouldMirrorBackendOutputToConsole(false, {
+        AGENT_NANONI_SMOKE: "1",
+      }),
+      true,
+    );
+  });
   it("advances a retained output offset instead of repeatedly copying a full head chunk", () => {
     const maxBufferedBytes = 1024 * 1024;
     const initial = DesktopObservability.appendBoundedOutputChunk(

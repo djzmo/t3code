@@ -355,6 +355,11 @@ const writeDevelopmentConsoleOutput = (
     output.write(chunk);
   }).pipe(Effect.ignore);
 
+export const shouldMirrorBackendOutputToConsole = (
+  isDevelopment: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean => isDevelopment || env.AGENT_NANONI_SMOKE === "1";
+
 const writeBackendChildLogRecord = Effect.fn("desktop.observability.writeBackendChildLogRecord")(
   function* (
     logFile: RotatingLogFileWriter,
@@ -478,7 +483,7 @@ const makeBackendOutputLogShape = (
             );
           }),
           writeOutputChunk: Effect.fnUntraced(function* (streamName, chunk) {
-            if (environment.isDevelopment) {
+            if (shouldMirrorBackendOutputToConsole(environment.isDevelopment)) {
               yield* writeDevelopmentConsoleOutput(streamName, chunk);
             }
             yield* Ref.update(

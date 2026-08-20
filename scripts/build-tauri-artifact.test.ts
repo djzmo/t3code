@@ -18,6 +18,7 @@ import {
   resolveTauriCliCwd,
   resolvePinnedNodeEnvironment,
   resolveTauriSmokeBundlePath,
+  withLinuxAppImageExtractAndRun,
 } from "./build-tauri-artifact.ts";
 import { stageTauriResources } from "./lib/tauri-stage.ts";
 
@@ -163,6 +164,19 @@ describe("Tauri artifact orchestration", () => {
       AGENT_NANONI_SMOKE: "1",
     });
     expect(smokes[1]?.environment).toMatchObject({ AGENT_NANONI_SMOKE_KILL_HOST: "1" });
+  });
+
+  it("enables linuxdeploy extract-and-run for Linux tauri builds and AppImage smokes", () => {
+    expect(withLinuxAppImageExtractAndRun("linux", { PATH: "/usr/bin" })).toEqual({
+      PATH: "/usr/bin",
+      APPIMAGE_EXTRACT_AND_RUN: "1",
+    });
+    expect(withLinuxAppImageExtractAndRun("mac", { PATH: "/usr/bin" })).toEqual({
+      PATH: "/usr/bin",
+    });
+    expect(withLinuxAppImageExtractAndRun("win", { PATH: "/usr/bin" })).toEqual({
+      PATH: "/usr/bin",
+    });
   });
 
   it("fails the file-count budget before build or smoke", async () => {

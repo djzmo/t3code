@@ -711,6 +711,13 @@ export const resolveTauriBuildArguments = (
   configOverlayPath,
 ];
 
+/** linuxdeploy is itself an AppImage; CI runners often lack FUSE. */
+export const withLinuxAppImageExtractAndRun = (
+  platform: TauriArtifactPlatform,
+  environment: Readonly<Record<string, string>>,
+): Readonly<Record<string, string>> =>
+  platform === "linux" ? { ...environment, APPIMAGE_EXTRACT_AND_RUN: "1" } : environment;
+
 export const resolvePinnedNodeEnvironment = async (
   rootDir: string,
   environment: Readonly<Record<string, string>>,
@@ -907,7 +914,10 @@ const createCliHooks = (options: TauriArtifactCliOptions) => {
     await spawnCommand(
       process.execPath,
       resolveTauriBuildArguments(tauriCli, context.configOverlayPath, options.debug),
-      { cwd: resolveTauriCliCwd(rootDir), environment: context.environment },
+      {
+        cwd: resolveTauriCliCwd(rootDir),
+        environment: withLinuxAppImageExtractAndRun(platform, context.environment),
+      },
     );
   };
   const smoke: TauriArtifactHook = async (context) => {
@@ -928,10 +938,7 @@ const createCliHooks = (options: TauriArtifactCliOptions) => {
       ],
       {
         cwd: rootDir,
-        environment: {
-          ...context.environment,
-          ...(platform === "linux" ? { APPIMAGE_EXTRACT_AND_RUN: "1" } : {}),
-        },
+        environment: withLinuxAppImageExtractAndRun(platform, context.environment),
       },
     );
   };
