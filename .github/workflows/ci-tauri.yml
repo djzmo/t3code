@@ -303,15 +303,28 @@ jobs:
           --bundle "${{ steps.resolve_macos_debug_bundle.outputs.bundle }}"
           --kill-host
 
-      - name: Document Windows fd transport boundary
+      - name: Resolve Windows packaged smoke bundle
         if: matrix.profile == 'debug' && runner.os == 'Windows'
-        shell: pwsh
+        id: resolve_windows_debug_bundle
+        shell: bash
         run: |
-          @"
-          ## Windows Tauri CI boundary
-          - Rust tests, formatting, Clippy, and the unsigned artifact build ran on Windows.
-          - Packaged smoke remains gated until the Phase 0 Windows bootstrap transport is selected; POSIX additional-fd mappings cannot provide Node fd3/fd4/fd5 on Windows.
-          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          bundle="$(node --input-type=module -e "const { resolveTauriSmokeBundlePath } = await import('./scripts/build-tauri-artifact.ts'); process.stdout.write(await resolveTauriSmokeBundlePath({ rootDir: process.cwd(), platform: 'win', profile: 'debug' }));")"
+          printf 'bundle=%s\n' "$bundle" >> "$GITHUB_OUTPUT"
+
+      - name: Run normal packaged smoke (Windows)
+        if: matrix.profile == 'debug' && runner.os == 'Windows'
+        shell: bash
+        run: >-
+          node apps/desktop/scripts/tauri/smoke-test.mjs
+          --bundle "${{ steps.resolve_windows_debug_bundle.outputs.bundle }}"
+
+      - name: Run forced-host packaged smoke (Windows)
+        if: matrix.profile == 'debug' && runner.os == 'Windows'
+        shell: bash
+        run: >-
+          node apps/desktop/scripts/tauri/smoke-test.mjs
+          --bundle "${{ steps.resolve_windows_debug_bundle.outputs.bundle }}"
+          --kill-host
 
       - name: Upload unsigned debug artifact
         uses: actions/upload-artifact@v7
