@@ -17,4 +17,8 @@ if (!source.includes("Object.defineProperty(exports")) {
   throw new Error("Tauri host artifact is not a CommonJS bundle");
 }
 
+if (/require\s*\(\s*["']effect(?:\/[^"']*)?["']\s*\)/.test(source)) {
+  throw new Error("Tauri host artifact retains a runtime Effect request");
+}
+
 console.log(`Tauri host bundle OK: ${artifact}`);

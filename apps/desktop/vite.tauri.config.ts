@@ -61,5 +61,9 @@ export default defineConfig({
   },
   ssr: {
     target: "node",
+    // Packaged AppImage/NSIS sidecars have no workspace node_modules. Vite SSR
+    // would otherwise emit `require("effect/Context")` and the host would crash
+    // before backend-ready.
+    noExternal: true,
   },
 });

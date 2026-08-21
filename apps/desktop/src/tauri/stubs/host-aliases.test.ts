@@ -54,7 +54,7 @@ describe("Tauri host module aliases", () => {
 
   it("declares the Node SSR host entry and deterministic CJS output", () => {
     assert.deepEqual(TAURI_HOST_BUILD, {
-      entry: "src/tauri/main.ts",
+      entry: "src/tauri/host-entry.ts",
       outDir: "dist-tauri-host",
       fileName: "host.cjs",
     });
@@ -78,7 +78,7 @@ describe("Tauri host module aliases", () => {
       }
     ).build;
     assert.deepEqual(build, {
-      ssr: "src/tauri/main.ts",
+      ssr: "src/tauri/host-entry.ts",
       outDir: "dist-tauri-host",
       emptyOutDir: true,
       sourcemap: true,
@@ -90,7 +90,10 @@ describe("Tauri host module aliases", () => {
         },
       },
     });
-    assert.deepEqual((tauriConfig.default as { ssr?: unknown }).ssr, { target: "node" });
+    assert.deepEqual((tauriConfig.default as { ssr?: unknown }).ssr, {
+      target: "node",
+      noExternal: true,
+    });
   });
 
   it("maps every forbidden runtime package to an existing exact stub", () => {
