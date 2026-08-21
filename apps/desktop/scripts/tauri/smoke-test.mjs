@@ -9,7 +9,12 @@ import { fileURLToPath } from "node:url";
 const scriptDirectory = NodePath.dirname(fileURLToPath(import.meta.url));
 const desktopDirectory = NodePath.resolve(scriptDirectory, "../..");
 
-const DEFAULT_TIMEOUT_MS = 30_000;
+// Linux AppImage smoke extracts under APPIMAGE_EXTRACT_AND_RUN before the host
+// logs. On ubuntu-22.04 debug that extract is ~30s, so a 30s ready wait expires
+// after the server is already listening.
+export const defaultSmokeTimeoutMs = (platform = process.platform) =>
+  platform === "linux" ? 90_000 : 30_000;
+const DEFAULT_TIMEOUT_MS = defaultSmokeTimeoutMs();
 const DEFAULT_READY_PATTERN = /(?:backend[ ._-]+ready|shell\.hello|nanoni\.phase0\.echo)/i;
 const SMOKE_HOME_LOG_RELATIVE_PATHS = [
   "userdata/logs/server-child.log",

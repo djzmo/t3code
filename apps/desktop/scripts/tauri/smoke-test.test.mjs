@@ -4,6 +4,7 @@ import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 
 import {
+  defaultSmokeTimeoutMs,
   hasRequiredSmokeReadiness,
   packagedServerEntryFromBundle,
   readSmokeHomeDiagnostics,
@@ -34,6 +35,12 @@ const makeFakeChild = () => {
 };
 
 describe("Tauri packaged smoke readiness", () => {
+  it("gives Linux AppImage extract enough time to reach backend readiness", () => {
+    expect(defaultSmokeTimeoutMs("linux")).toBe(90_000);
+    expect(defaultSmokeTimeoutMs("win32")).toBe(30_000);
+    expect(defaultSmokeTimeoutMs("darwin")).toBe(30_000);
+  });
+
   it("requires backend readiness and the first renderer round-trip", () => {
     expect(hasRequiredSmokeReadiness("AGENT_NANONI_SMOKE backend-ready")).toBe(false);
     expect(hasRequiredSmokeReadiness("AGENT_NANONI_SMOKE first-roundtrip")).toBe(false);
