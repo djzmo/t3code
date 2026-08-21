@@ -8,18 +8,18 @@ smoke, or UI-compatibility requirement.
 
 ## Phase 0 evidence
 
-Evidence current on 2026-08-20:
+Evidence current on 2026-08-21 (Tauri CI run `32442667396`, SHA `7f2bc9f06`):
 
 | Objective | Current evidence                                                                                                                                                                                                                                                                                                                                                   | Remaining acceptance work                                                                                                                                                             |
 | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | V0        | Recorder and focused tests are green.                                                                                                                                                                                                                                                                                                                              | Run Electron and final Tauri measurements on Windows, macOS, and Linux.                                                                                                               |
-| V1.0      | Shared TypeScript/Rust protocol fixtures, release guard, toolchain alignment, and CI jobs are implemented.                                                                                                                                                                                                                                                         | Record a green external CI run.                                                                                                                                                       |
+| V1.0      | Shared TypeScript/Rust protocol fixtures, release guard, toolchain alignment, and CI jobs are implemented. Tauri protocol jobs (TypeScript + Rust on ubuntu-22.04, windows-2022, macos-14) passed on SHA `7f2bc9f06`.                                                                                                                                              | Repo `Check`/`Test` still wait on Blacksmith runners; they are not a Tauri smoke failure.                                                                                             |
 | V1.1      | The real desktop composition and server run under the FakeShell integration test. The test now proves the authoritative HTTP readiness receipt, active native registration, reveal ordering, and managed cleanup; derived process helpers have an explicit C1 audit.                                                                                               | Exercise the SSH spawn path in an environment with a real SSH target.                                                                                                                 |
 | V1.2      | Framing, lifecycle, native process broker, retained process identity, shared Unix host-group cleanup, containment unit tests, the real `DesktopLifecycle`/`DesktopUpdates` integration proof, and a macOS-only `applicationShouldTerminate:` hook that feeds the existing `ExitRequested` dispatcher. Live Cmd+Q is still unverified (no Mac in this environment). | Confirm Cmd+Q / Dock Quit on macOS and complete three-OS containment fixtures.                                                                                                        |
 | V1.3      | Invoke, push, sync boot values, navigation guards, and the external-URL allow-list have TypeScript and Rust coverage. Packaged WebView2 smoke completed a real `host_invoke` round-trip.                                                                                                                                                                           | Record the remaining integrated UI compatibility matrix.                                                                                                                              |
 | V1.4      | Shim, development loop, identity overlay, and home isolation are implemented. V1b is **not selected** because the init-script shim supplies the existing `DesktopBridge` contract without a web adapter.                                                                                                                                                           | Confirm the rest of the core-UI checklist in an attended pass.                                                                                                                        |
-| V1.5      | Staging, payload validation, smoke harnesses, and Windows packaging are implemented. Windows primary uses stdin/`--bootstrap-fd 0`. Packaged debug smokes (normal + `--kill-host`) both passed on 2026-08-20.                                                                                                                                                      | macOS/Linux packaged smokes remain environment-blocked.                                                                                                                               |
-| V1.6      | Debug and release artifact matrices are defined for all three operating systems.                                                                                                                                                                                                                                                                                   | Obtain a green matrix, three-webview UI evidence, and LAN/Tailscale web/mobile remote-readiness evidence.                                                                             |
+| V1.5      | Staging, payload validation, smoke harnesses, and Windows packaging are implemented. Windows primary uses stdin/`--bootstrap-fd 0`. Packaged debug smokes (normal + `--kill-host`) passed locally on 2026-08-20 and again in CI on 2026-08-21 for Windows, macOS, and Linux AppImage (`Tauri smoke passed (normal)` and `(forced-kill)` on ubuntu-22.04).          | Wayland AppImage launch and attended core-UI matrix remain pending.                                                                                                                   |
+| V1.6      | Debug and release artifact jobs passed on ubuntu-22.04, windows-2022, and macos-14 for SHA `7f2bc9f06` (run `32442667396`).                                                                                                                                                                                                                                        | Three-webview UI evidence and LAN/Tailscale web/mobile remote-readiness remain pending.                                                                                               |
 | V2        | The gated real-bridge benchmark now measures 1,000 round trips, 100 renderer-scheduled pushes, exact 1 MiB throughput, reload stability, and failure behavior without synthetic timing. No performance result is claimed yet.                                                                                                                                      | Run the benchmark through Tauri Pilot on WebView2, WKWebView, and WebKitGTK and record the measured criteria.                                                                         |
 | V3a       | Exact remote CLI/version pins, grammar, computed closure, npm surface, and fallback policy are implemented. The live registry and Sigstore/SLSA verification passed again on 2026-08-19.                                                                                                                                                                           | Exercise one pinned SSH provisioning pass.                                                                                                                                            |
 | V3b       | Boot metadata and version-skew tests are implemented.                                                                                                                                                                                                                                                                                                              | Confirm all values at first evaluation in the packaged UI.                                                                                                                            |
@@ -71,12 +71,23 @@ Debug bundle hashes from that passing rebuild:
 - MSI: `5e8cc435620e1f4010951169b1d50a81adef3ed5fe359c6fb7d3f66bae9d350f`
 - NSIS: `b09c5cbb405baa38cf1bdc4b43a769411473ac6c1c7b6469507feb8bdd86679a`
 
-Skipped while unattended: three-OS measurements, live macOS Cmd+Q, Linux
-AppImage/WebKitGTK, LAN/Tailscale remote-readiness, attended core-UI matrix
-beyond the smoke round-trip, WSL-from-packaged if it needs interactive
-approval, and Topology A / Tauri Pilot. Pilot needs a separate debug build
-with `--features topology-a-pilot`; a prior attach failed with `No tauri-pilot
-instances directory found`. That is not a source merge blocker.
+External Tauri CI on SHA `7f2bc9f06` (run `32442667396`, 2026-08-21)
+built debug and release artifacts on ubuntu-22.04, windows-2022, and macos-14.
+Ubuntu debug smoke logged both `Tauri smoke passed (normal)` and
+`Tauri smoke passed (forced-kill)` after AppImage extract under
+`APPIMAGE_EXTRACT_AND_RUN=1` (90s Linux smoke timeout). macOS and Windows
+debug jobs also completed with packaged smokes. Repo `CI` (`Check`/`Test`)
+and `Mobile Fingerprint Check` remained queued on Blacksmith runners at
+documentation time and are not treated as Tauri smoke failures.
+
+Skipped while unattended: three-OS idle/CPU measurements, live macOS Cmd+Q,
+LAN/Tailscale remote-readiness, attended core-UI matrix beyond the smoke
+round-trip, WSL-from-packaged if it needs interactive approval, Topology A /
+Tauri Pilot, and a WebKitGTK AppImage launch on a newer Wayland distribution.
+CI xvfb Linux AppImage smoke is not that Wayland launch. Pilot needs a
+separate debug build with `--features topology-a-pilot`; a prior attach failed
+with `No tauri-pilot instances directory found`. That is not a source merge
+blocker.
 
 The previous unsigned release hashes (pre-stdin, not a launch) were:
 
@@ -189,17 +200,17 @@ The following is a manual report skeleton. Evidence is required for every
 status change. A WebKitGTK pass must include one packaged AppImage launch on a
 newer Wayland distribution (Tauri issue #15665 context).
 
-| Webview   | Overall    | Evidence                                                                                                                                         |
-| --------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| WKWebView | pending    | pending approved execution                                                                                                                       |
-| WebKitGTK | pending    | pending approved execution                                                                                                                       |
-| WebView2  | smoke-pass | Packaged debug smoke reached `first-roundtrip` (`host_invoke`) on 2026-08-20. Core-UI matrix not filled (unattended; no integrated client pass). |
+| Webview   | Overall    | Evidence                                                                                                                                          |
+| --------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| WKWebView | smoke-ci   | macos-14 packaged debug smoke completed on SHA `7f2bc9f06` (run `32442667396`). Core-UI matrix not filled.                                        |
+| WebKitGTK | smoke-ci   | ubuntu-22.04 xvfb AppImage smoke reached `first-roundtrip` on SHA `7f2bc9f06`. Wayland launch still pending.                                      |
+| WebView2  | smoke-pass | Packaged debug smoke reached `first-roundtrip` (`host_invoke`) locally on 2026-08-20 and again on windows-2022 CI (`7f2bc9f06`). Core-UI pending. |
 
-| Target    | Launch  | Core UI | Ghostty terminal | Diff panel | Drag/drop | Paste   | Popovers | Fonts   | WebSocket reconnect |
-| --------- | ------- | ------- | ---------------- | ---------- | --------- | ------- | -------- | ------- | ------------------- |
-| WKWebView | pending | pending | pending          | pending    | pending   | pending | pending  | pending | pending             |
-| WebKitGTK | pending | pending | pending          | pending    | pending   | pending | pending  | pending | pending             |
-| WebView2  | pass    | pending | pending          | pending    | pending   | pending | pending  | pending | pending             |
+| Target    | Launch   | Core UI | Ghostty terminal | Diff panel | Drag/drop | Paste   | Popovers | Fonts   | WebSocket reconnect |
+| --------- | -------- | ------- | ---------------- | ---------- | --------- | ------- | -------- | ------- | ------------------- |
+| WKWebView | smoke-ci | pending | pending          | pending    | pending   | pending | pending  | pending | pending             |
+| WebKitGTK | smoke-ci | pending | pending          | pending    | pending   | pending | pending  | pending | pending             |
+| WebView2  | pass     | pending | pending          | pending    | pending   | pending | pending  | pending | pending             |
 
 The only Phase 0 stop condition is a blocking WebKit defect with no plausible
 fix. Findings and reproduction notes belong in the result report once the
