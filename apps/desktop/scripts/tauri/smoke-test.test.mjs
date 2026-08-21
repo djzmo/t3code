@@ -8,6 +8,7 @@ import {
   hasRequiredSmokeReadiness,
   packagedServerEntryFromBundle,
   readSmokeHomeDiagnostics,
+  resolveSmokeTempRoot,
   runSmoke,
 } from "./smoke-test.mjs";
 
@@ -152,5 +153,24 @@ describe("Tauri packaged smoke readiness", () => {
         },
       },
     });
+  });
+
+  it("gives the Windows child a long TEMP path so libuv fs-event does not abort", async () => {
+    let env;
+    const child = makeFakeChild();
+    const spawn = (_binary, _args, options) => {
+      env = options.env;
+      queueMicrotask(() => {
+        child.stderr.write(READINESS);
+        child.emit("exit", 0, null);
+        child.emit("close", 0, null);
+      });
+      return child;
+    };
+    await runSmoke(smokeOptions(), { spawn });
+    expect(env.TEMP).toBe(resolveSmokeTempRoot());
+    expect(env.TMP).toBe(env.TEMP);
+    expect(env.TMPDIR).toBe(env.TEMP);
+    expect(env.TEMP).not.toMatch(/~/);
   });
 });

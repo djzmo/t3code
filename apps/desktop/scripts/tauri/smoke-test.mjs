@@ -2,6 +2,7 @@
 
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs/promises";
+import * as NodeFSSync from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,6 +25,15 @@ const SMOKE_HOME_DIAGNOSTIC_BYTES = 64 * 1024;
 
 export const hasRequiredSmokeReadiness = (output, readyPattern = DEFAULT_READY_PATTERN) =>
   readyPattern.test(output) && output.includes("AGENT_NANONI_SMOKE first-roundtrip");
+
+/** GitHub Windows runners often set TEMP to an 8.3 path; libuv fs-event aborts there. */
+export const resolveSmokeTempRoot = (tmpdir = NodeOS.tmpdir()) => {
+  try {
+    return NodeFSSync.realpathSync.native(tmpdir);
+  } catch {
+    return NodePath.resolve(tmpdir);
+  }
+};
 
 export const packagedServerEntryFromBundle = (binaryPath, platform = process.platform) => {
   if (platform !== "darwin") return undefined;
@@ -130,9 +140,10 @@ export const runSmoke = async (options, dependencies = {}) => {
   const spawn = dependencies.spawn ?? NodeChildProcess.spawn;
   const fileSystem = dependencies.fileSystem ?? NodeFS;
   const configuredSmokeHome = process.env.AGENT_NANONI_SMOKE_HOME;
+  const tempRoot = resolveSmokeTempRoot();
   const smokeHome =
     configuredSmokeHome ??
-    (await fileSystem.mkdtemp(NodePath.join(NodeOS.tmpdir(), "agent-nanoni-smoke-")));
+    (await fileSystem.mkdtemp(NodePath.join(tempRoot, "agent-nanoni-smoke-")));
   try {
     const packagedServerEntry = packagedServerEntryFromBundle(options.binary);
     if (packagedServerEntry !== undefined) {
@@ -155,6 +166,9 @@ export const runSmoke = async (options, dependencies = {}) => {
       stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
+        TEMP: tempRoot,
+        TMP: tempRoot,
+        TMPDIR: tempRoot,
         AGENT_NANONI_SMOKE: "1",
         AGENT_NANONI_SMOKE_HOME: smokeHome,
         ...(options.killHost ? { AGENT_NANONI_SMOKE_KILL_HOST: "1" } : {}),

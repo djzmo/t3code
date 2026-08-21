@@ -93,6 +93,11 @@ separate debug build with `--features topology-a-pilot`; a prior attach failed
 with `No tauri-pilot instances directory found`. That is not a source merge
 blocker.
 
+Windows GitHub runners often set `TEMP` to an 8.3 short path. Packaged Node
+then aborts in libuv `fs-event.c` (`Assertion failed: !_wcsnicmp(filename,
+dir, dirlen)`). The smoke harness now expands `TEMP`/`TMP`/`TMPDIR` with
+`realpathSync.native` before spawn.
+
 The previous unsigned release hashes (pre-stdin, not a launch) were:
 
 - executable: `8B3D918EBF0F4409FA9ABC5EE9BBD76D50E12672C9745A7EB60F051BB3885634`;
