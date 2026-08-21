@@ -465,6 +465,18 @@ describe("Tauri artifact orchestration", () => {
       platform: "linux",
     });
     expect(overlay.productName).toBe("AgentNanoni");
+    expect(overlay.bundle.targets).toBeUndefined();
+  });
+
+  it("limits Linux debug bundles to AppImage so rpmbuild cannot stall CI", () => {
+    const overlay = createTauriConfigOverlay({
+      productVersion: "1.2.3",
+      frontendDist: "./dist",
+      stageRoot: "./stage",
+      platform: "linux",
+      debug: true,
+    });
+    expect(overlay.bundle.targets).toEqual(["appimage"]);
   });
 
   it("runs the Tauri CLI from the desktop project directory", () => {

@@ -77,6 +77,8 @@ export interface TauriConfigOverlay {
   readonly bundle: {
     readonly resources: Readonly<Record<string, string>>;
     readonly createUpdaterArtifacts: false;
+    /** Debug Linux omits rpm/deb; rpmbuild stalls on unstripped debug ELFs. */
+    readonly targets?: ReadonlyArray<"appimage">;
   };
 }
 
@@ -159,6 +161,7 @@ export interface BuildTauriArtifactOptions extends Omit<
   /** Defaults to a generated file next to (not inside) the stage directory. */
   readonly configOverlayPath?: string;
   readonly binaryPath?: string;
+  readonly debug?: boolean;
   readonly dependencies?: TauriArtifactDependencies;
 }
 
@@ -329,12 +332,14 @@ export const toTauriOverlayFrontendDist = (frontendDist: string, stageRoot: stri
 };
 
 export const LINUX_APPIMAGE_PRODUCT_NAME = "AgentNanoni";
+export const LINUX_DEBUG_BUNDLE_TARGETS = ["appimage"] as const;
 
 export const createTauriConfigOverlay = (input: {
   readonly productVersion: string;
   readonly frontendDist: string;
   readonly stageRoot: string;
   readonly platform?: TauriArtifactPlatform;
+  readonly debug?: boolean;
 }): TauriConfigOverlay => ({
   version: input.productVersion,
   ...(input.platform === "linux" ? { productName: LINUX_APPIMAGE_PRODUCT_NAME } : {}),
@@ -345,6 +350,9 @@ export const createTauriConfigOverlay = (input: {
     // names such as package.json.
     resources: { [`${NodePath.resolve(input.stageRoot)}${NodePath.sep}`]: "" },
     createUpdaterArtifacts: false,
+    ...(input.platform === "linux" && input.debug
+      ? { targets: [...LINUX_DEBUG_BUNDLE_TARGETS] }
+      : {}),
   },
 });
 
@@ -612,6 +620,7 @@ export const buildTauriArtifact = async (
     frontendDist,
     stageRoot,
     platform,
+    debug: options.debug === true,
   });
   if (dependencies.writeOverlay) {
     await dependencies.writeOverlay(
