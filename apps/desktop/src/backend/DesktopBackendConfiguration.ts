@@ -480,6 +480,9 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
     const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
     const backendExposure = yield* serverExposure.backendConfig;
+    // Windows cannot attach Node extra CRT fds (3/4/5). Deliver the envelope on
+    // stdin like the WSL path; omit telemetry fds until F8 sysinfo.
+    const isWin32 = environment.platform === "win32";
 
     const bootstrap = {
       mode: "desktop" as const,
@@ -490,8 +493,12 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       desktopBootstrapToken: input.bootstrapToken,
       tailscaleServeEnabled: backendExposure.tailscaleServeEnabled,
       tailscaleServePort: backendExposure.tailscaleServePort,
-      desktopTelemetryFd: 4,
-      desktopTelemetryControlFd: 5,
+      ...(isWin32
+        ? {}
+        : {
+            desktopTelemetryFd: 4,
+            desktopTelemetryControlFd: 5,
+          }),
       ...Option.match(input.resourceMonitorPath, {
         onNone: () => ({}),
         onSome: (resourceMonitorPath) => ({ resourceMonitorPath }),
@@ -501,7 +508,7 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
 
     return {
       executablePath: process.execPath,
-      args: [environment.backendEntryPath, "--bootstrap-fd", "3"],
+      args: [environment.backendEntryPath, "--bootstrap-fd", isWin32 ? "0" : "3"],
       entryPath: environment.backendEntryPath,
       cwd: environment.backendCwd,
       env: {
@@ -511,7 +518,7 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       // Primary wants process.env (PATH, dev-runner's T3CODE_HOME, etc.).
       extendEnv: true,
       bootstrap,
-      bootstrapDelivery: "fd3",
+      bootstrapDelivery: isWin32 ? "stdin" : "fd3",
       httpBaseUrl: backendExposure.httpBaseUrl,
       captureOutput: true,
       preflightFailure: Option.none(),

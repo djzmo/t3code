@@ -1,0 +1,20 @@
+{
+  "main": {
+    "identifier": "main",
+    "description": "Permissions for the main Agent Nanoni webview.",
+    "local": true,
+    "webviews": ["main"],
+    "permissions": [
+      "core:event:default",
+      "core:window:allow-start-dragging",
+      "core:window:allow-internal-toggle-maximize",
+      "core:window:allow-toggle-maximize",
+      "core:window:allow-minimize",
+      "core:window:allow-close",
+      "core:window:allow-is-maximized",
+      "core:window:allow-is-fullscreen",
+      "allow-host-invoke",
+      "allow-desktop-events"
+    ]
+  }
+}

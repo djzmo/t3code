@@ -1,0 +1,1511 @@
+{
+  "protocolVersion": "2.0",
+  "fixtures": [
+    {
+      "name": "shell.hello/request",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "shell.hello",
+        "params": {
+          "protocolVersion": "2.0",
+          "hostPid": 4242
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "shell.hello/response",
+      "direction": "shell-to-host",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+          "appName": "Agent Nanoni",
+          "identifier": "app.nanoni.agent.desktop",
+          "version": "1.0.0",
+          "tauriVersion": "2.11.5",
+          "platform": "windows",
+          "arch": "x86_64",
+          "isDev": true,
+          "execPath": "C:/Apps/AgentNanoni.exe",
+          "resourceDir": "C:/Apps/resources",
+          "serverRoot": "C:/Apps/resources/server",
+          "appDataDir": "C:/Users/alice/AppData/Roaming/AgentNanoni",
+          "logDir": "C:/Users/alice/AppData/Roaming/AgentNanoni/logs",
+          "systemLocale": "en-US",
+          "deepLinkScheme": "agent-nanoni",
+          "argv": ["--debug"],
+          "launchUrls": []
+        }
+      },
+      "kind": "response"
+    },
+    {
+      "name": "app.quit",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "app.quit"
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "app.exit",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "app.exit",
+        "params": {
+          "code": 0
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "app.relaunch",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "app.relaunch"
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "app.focus",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "app.focus",
+        "params": {
+          "steal": true
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "app.isProtocolClient",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "app.isProtocolClient",
+        "params": {
+          "scheme": "agent-nanoni"
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "app.setProtocolClient",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "app.setProtocolClient",
+        "params": {
+          "scheme": "agent-nanoni"
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "app.getMetrics",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "app.getMetrics"
+      },
+      "kind": "request"
+    },
+    {
+      "name": "app.before-quit",
+      "direction": "shell-to-host",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "app.before-quit",
+        "params": {
+          "reason": "user"
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "app.window-all-closed",
+      "direction": "shell-to-host",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "app.window-all-closed"
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "app.activate",
+      "direction": "shell-to-host",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "app.activate",
+        "params": {
+          "hasVisibleWindows": false
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "app.second-instance",
+      "direction": "shell-to-host",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "app.second-instance",
+        "params": {
+          "argv": ["--open", "README.md"],
+          "cwd": "C:/work"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "app.open-url",
+      "direction": "shell-to-host",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "app.open-url",
+        "params": {
+          "urls": ["agent-nanoni://callback?code=abc"]
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "app.shutdown-complete",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "app.shutdown-complete"
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "process.register",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "process.register",
+        "params": {
+          "attemptId": "attempt-1",
+          "pid": 7001,
+          "kind": "server",
+          "spawnedAtMs": 1730000000000
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "process.unregister",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "process.unregister",
+        "params": {
+          "registrationId": "registration-1"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "process.cancel",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "process.cancel",
+        "params": {
+          "attemptId": "attempt-1"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "ipc.invoke",
+      "direction": "shell-to-host",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "ipc.invoke",
+        "params": {
+          "channel": "desktop:get-app-branding",
+          "payload": null
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "ipc.push",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "ipc.push",
+        "params": {
+          "channel": "desktop:window-fullscreen-state",
+          "payload": {
+            "fullscreen": false
+          }
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "window.create",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 10,
+        "method": "window.create",
+        "params": {
+          "label": "main",
+          "url": "http://127.0.0.1:3773/",
+          "title": "Agent Nanoni",
+          "width": 1200,
+          "height": 800,
+          "minWidth": 640,
+          "minHeight": 480,
+          "show": false,
+          "backgroundColor": "#111111",
+          "decorations": false,
+          "titleBarStyle": "overlay",
+          "hiddenTitle": true,
+          "trafficLightPosition": {
+            "x": 16,
+            "y": 18
+          },
+          "initScripts": ["window.__NANONI_BOOT__ = {};"],
+          "zoomFactor": 1
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "window.show",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "window.show",
+        "params": {
+          "label": "main"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "window.hide",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "window.hide",
+        "params": {
+          "label": "main"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "window.close",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "window.close",
+        "params": {
+          "label": "main"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "window.destroy",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "window.destroy",
+        "params": {
+          "label": "main"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "window.focus",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "window.focus",
+        "params": {
+          "label": "main"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "window.minimize",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "window.minimize",
+        "params": {
+          "label": "main"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "window.restore",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "window.restore",
+        "params": {
+          "label": "main"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "window.maximize",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "window.maximize",
+        "params": {
+          "label": "main"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "window.unmaximize",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "window.unmaximize",
+        "params": {
+          "label": "main"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "window.reload",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "window.reload",
+        "params": {
+          "label": "main"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "window.toggleDevTools",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "window.toggleDevTools",
+        "params": {
+          "label": "main"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "window.setFullscreen",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "window.setFullscreen",
+        "params": {
+          "label": "main",
+          "fullscreen": true
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "window.setTitle",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "window.setTitle",
+        "params": {
+          "label": "main",
+          "title": "Agent Nanoni"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "window.setBounds",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "window.setBounds",
+        "params": {
+          "label": "main",
+          "x": 10,
+          "y": 20,
+          "width": 1200,
+          "height": 800
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "window.setBackgroundColor",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "window.setBackgroundColor",
+        "params": {
+          "label": "main",
+          "color": "#111111"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "window.setZoom",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "window.setZoom",
+        "params": {
+          "label": "main",
+          "zoomFactor": 1.1
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "window.setAlwaysOnTop",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "window.setAlwaysOnTop",
+        "params": {
+          "label": "main",
+          "flag": true
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "window.getBounds",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 11,
+        "method": "window.getBounds",
+        "params": {
+          "label": "main"
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "window.getState",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 12,
+        "method": "window.getState",
+        "params": {
+          "label": "main"
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "window.event",
+      "direction": "shell-to-host",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "window.event",
+        "params": {
+          "label": "main",
+          "type": "created"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "dialog.openFolder",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 13,
+        "method": "dialog.openFolder",
+        "params": {
+          "ownerLabel": "main",
+          "defaultPath": "C:/work"
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "dialog.openFiles",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 14,
+        "method": "dialog.openFiles",
+        "params": {
+          "ownerLabel": "main",
+          "filters": [
+            {
+              "name": "Text",
+              "extensions": ["txt", "md"]
+            }
+          ]
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "dialog.message",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 15,
+        "method": "dialog.message",
+        "params": {
+          "kind": "info",
+          "title": "Ready",
+          "message": "Server ready",
+          "detail": "",
+          "buttons": ["OK"],
+          "defaultId": 0,
+          "cancelId": 0
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "dialog.error",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 16,
+        "method": "dialog.error",
+        "params": {
+          "title": "Startup failed",
+          "content": "The host exited."
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "menu.setApplication",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 17,
+        "method": "menu.setApplication",
+        "params": {
+          "items": [
+            {
+              "id": "file",
+              "label": "File",
+              "submenu": [
+                {
+                  "id": "quit",
+                  "role": "quit",
+                  "label": "Quit"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "menu.popup",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 18,
+        "method": "menu.popup",
+        "params": {
+          "ownerLabel": "main",
+          "items": [
+            {
+              "id": "copy",
+              "label": "Copy"
+            }
+          ],
+          "position": {
+            "x": 20,
+            "y": 30
+          }
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "menu.click",
+      "direction": "shell-to-host",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "menu.click",
+        "params": {
+          "id": "copy"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "shell.openExternal",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 19,
+        "method": "shell.openExternal",
+        "params": {
+          "url": "https://example.com"
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "shell.showItemInFolder",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "shell.showItemInFolder",
+        "params": {
+          "path": "C:/work/README.md"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "clipboard.writeText",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "clipboard.writeText",
+        "params": {
+          "text": "copied text"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "wsl.registerGuest",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 22,
+        "method": "wsl.registerGuest",
+        "params": {
+          "instanceId": "wsl-primary",
+          "distro": "Ubuntu",
+          "nonce": "nonce-1",
+          "identityFile": "C:/state/wsl.json",
+          "state": "pending",
+          "pid": 7002,
+          "pgid": 7002
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "wsl.unregisterGuest",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 23,
+        "method": "wsl.unregisterGuest",
+        "params": {
+          "instanceId": "wsl-primary"
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "auth.callback",
+      "direction": "shell-to-host",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "auth.callback",
+        "params": {
+          "url": "agent-nanoni://auth/callback?code=abc&state=xyz"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "theme.get",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 24,
+        "method": "theme.get"
+      },
+      "kind": "request"
+    },
+    {
+      "name": "theme.setSource",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "theme.setSource",
+        "params": {
+          "source": "dark"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "theme.updated",
+      "direction": "shell-to-host",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "theme.updated",
+        "params": {
+          "shouldUseDarkColors": true
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "safeStorage.status",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 26,
+        "method": "safeStorage.status"
+      },
+      "kind": "request"
+    },
+    {
+      "name": "safeStorage.encrypt",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 27,
+        "method": "safeStorage.encrypt",
+        "params": {
+          "plaintext": "secret"
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "safeStorage.decrypt",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 28,
+        "method": "safeStorage.decrypt",
+        "params": {
+          "ciphertextBase64": "c2VjcmV0"
+        }
+      },
+      "kind": "request"
+    },
+    {
+      "name": "updater.configure",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "updater.configure",
+        "params": {
+          "endpoints": ["https://updates.example.com/latest.json"],
+          "channel": "stable",
+          "allowDowngrade": false,
+          "target": "x86_64-pc-windows-msvc"
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "updater.check",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 30,
+        "method": "updater.check"
+      },
+      "kind": "request"
+    },
+    {
+      "name": "updater.download",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "updater.download"
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "updater.install",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "updater.install",
+        "params": {
+          "relaunch": true
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "updater.progress",
+      "direction": "shell-to-host",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "updater.progress",
+        "params": {
+          "transferred": 1024,
+          "total": 4096
+        }
+      },
+      "kind": "notification"
+    },
+    {
+      "name": "power.snapshot",
+      "direction": "host-to-shell",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 33,
+        "method": "power.snapshot"
+      },
+      "kind": "request"
+    },
+    {
+      "name": "power.event",
+      "direction": "shell-to-host",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "method": "power.event",
+        "params": {
+          "type": "on-battery",
+          "value": true
+        }
+      },
+      "kind": "notification"
+    }
+  ],
+  "errors": [
+    {
+      "name": "invalid-request",
+      "description": "A frame is not a valid JSON-RPC request or notification.",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": null,
+        "error": {
+          "code": -32600,
+          "message": "Invalid Request"
+        }
+      },
+      "expectKind": "invalid-request"
+    },
+    {
+      "name": "method-not-found",
+      "description": "The method name is not implemented by the peer.",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 34,
+        "error": {
+          "code": -32601,
+          "message": "Method not found",
+          "data": {
+            "kind": "unsupported"
+          }
+        }
+      },
+      "expectKind": "method-not-found"
+    },
+    {
+      "name": "invalid-params",
+      "description": "The method parameters fail their schema.",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 35,
+        "error": {
+          "code": -32602,
+          "message": "Invalid params",
+          "data": {
+            "kind": "invalid-params"
+          }
+        }
+      },
+      "expectKind": "invalid-params"
+    },
+    {
+      "name": "platform",
+      "description": "A platform operation failed.",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 36,
+        "error": {
+          "code": -32000,
+          "message": "Platform operation failed",
+          "data": {
+            "kind": "platform"
+          }
+        }
+      },
+      "expectKind": "platform"
+    },
+    {
+      "name": "unsupported",
+      "description": "The method is recognized but unavailable on this platform.",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 37,
+        "error": {
+          "code": -32001,
+          "message": "Unsupported",
+          "data": {
+            "kind": "unsupported"
+          }
+        }
+      },
+      "expectKind": "unsupported"
+    },
+    {
+      "name": "cancelled",
+      "description": "A pending request was cancelled after peer closure or $/cancel.",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 38,
+        "error": {
+          "code": -32002,
+          "message": "Cancelled",
+          "data": {
+            "kind": "cancelled"
+          }
+        }
+      },
+      "expectKind": "cancelled"
+    },
+    {
+      "name": "timeout",
+      "description": "A request exceeded its deadline.",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 39,
+        "error": {
+          "code": -32003,
+          "message": "Timeout",
+          "data": {
+            "kind": "timeout"
+          }
+        }
+      },
+      "expectKind": "timeout"
+    }
+  ],
+  "limits": [
+    {
+      "name": "max-frame-bytes",
+      "description": "A frame at the byte limit is accepted.",
+      "limit": 16777216,
+      "observed": 16777216,
+      "expect": "accept"
+    },
+    {
+      "name": "oversized-frame",
+      "description": "A frame over the byte limit closes the transport.",
+      "limit": 16777216,
+      "observed": 16777217,
+      "expect": "close"
+    },
+    {
+      "name": "max-nesting-depth",
+      "description": "A value at the nesting limit is accepted.",
+      "limit": 64,
+      "observed": 64,
+      "expect": "accept"
+    },
+    {
+      "name": "too-deep-frame",
+      "description": "A value beyond the nesting limit closes the transport.",
+      "limit": 64,
+      "observed": 65,
+      "expect": "close"
+    },
+    {
+      "name": "pending-request-capacity",
+      "description": "The 1024th pending request is allowed.",
+      "limit": 1024,
+      "observed": 1024,
+      "expect": "queue"
+    },
+    {
+      "name": "pending-request-overflow",
+      "description": "The next pending request receives a busy platform error.",
+      "limit": 1024,
+      "observed": 1025,
+      "expect": "reject"
+    },
+    {
+      "name": "pre-ready-renderer-queue",
+      "description": "Invokes are queued until host readiness, up to 256 entries in 20 seconds.",
+      "limit": 256,
+      "observed": 256,
+      "expect": "queue"
+    },
+    {
+      "name": "pre-ready-renderer-overflow",
+      "description": "The 257th pre-ready invoke is rejected.",
+      "limit": 256,
+      "observed": 257,
+      "expect": "reject"
+    },
+    {
+      "name": "hello-timeout",
+      "description": "The shell closes a host that does not send hello within 15 seconds.",
+      "limit": 15000,
+      "observed": 15001,
+      "expect": "close"
+    },
+    {
+      "name": "cancel-request",
+      "description": "$/cancel removes a pending request by integer id.",
+      "limit": 1,
+      "observed": 1,
+      "expect": "cancel"
+    }
+  ],
+  "frames": [
+    {
+      "name": "ascii-frame",
+      "description": "A complete ASCII JSON frame.",
+      "frame": "\u001e17:{\"jsonrpc\":\"2.0\"}\n",
+      "expect": "accept"
+    },
+    {
+      "name": "emoji-byte-length",
+      "description": "The length prefix counts UTF-8 bytes rather than UTF-16 code units.",
+      "frame": "\u001e33:{\"jsonrpc\":\"2.0\",\"method\":\"💡\"}\n",
+      "expect": "accept"
+    },
+    {
+      "name": "cjk-byte-length",
+      "description": "CJK characters use three UTF-8 bytes each.",
+      "frame": "\u001e32:{\"jsonrpc\":\"2.0\",\"method\":\"界\"}\n",
+      "expect": "accept"
+    },
+    {
+      "name": "split-utf8-codepoint",
+      "description": "Input chunks may split inside a UTF-8 sequence and are reassembled.",
+      "bytes": [
+        30, 49, 55, 58, 123, 34, 106, 115, 111, 110, 114, 112, 99, 34, 58, 34, 50, 46, 48, 34, 125,
+        10
+      ],
+      "expect": "accept"
+    },
+    {
+      "name": "invalid-utf8",
+      "description": "Invalid UTF-8 is rejected without replacement decoding.",
+      "bytesBase64": "//4=",
+      "expect": "reject"
+    },
+    {
+      "name": "partial-frame",
+      "description": "A partial frame waits for more bytes.",
+      "bytes": [30, 49, 55, 58, 123, 34, 106, 115, 111, 110],
+      "expect": "resync"
+    },
+    {
+      "name": "unframed-bytes",
+      "description": "Unframed bytes are skipped until the next record separator.",
+      "bytes": [
+        65, 66, 67, 30, 49, 55, 58, 123, 34, 106, 115, 111, 110, 114, 112, 99, 34, 58, 34, 50, 46,
+        48, 34, 125, 10
+      ],
+      "expect": "resync"
+    },
+    {
+      "name": "malformed-json",
+      "description": "Malformed JSON is logged and the reader resumes at the next separator.",
+      "frame": "\u001e2:{x}\n",
+      "expect": "resync"
+    },
+    {
+      "name": "length-mismatch",
+      "description": "A mismatched byte length is logged and the reader resynchronizes.",
+      "frame": "\u001e99:{\"jsonrpc\":\"2.0\"}\n",
+      "expect": "resync"
+    },
+    {
+      "name": "direct-stdout-after-takeover",
+      "description": "Host stdout writes are redirected away from the framed stream.",
+      "bytes": [99, 111, 110, 115, 111, 108, 101, 46, 108, 111, 103],
+      "expect": "resync"
+    }
+  ],
+  "results": [
+    {
+      "name": "shell.hello/result",
+      "method": "shell.hello",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 100,
+        "result": {
+          "appName": "Agent Nanoni",
+          "identifier": "app.nanoni.agent.desktop",
+          "version": "1.0.0",
+          "tauriVersion": "2.11.5",
+          "platform": "windows",
+          "arch": "x86_64",
+          "isDev": true,
+          "execPath": "C:/Apps/AgentNanoni.exe",
+          "resourceDir": "C:/Apps/resources",
+          "serverRoot": "C:/Apps/resources/server",
+          "appDataDir": "C:/Users/alice/AppData/Roaming/AgentNanoni",
+          "logDir": "C:/Users/alice/AppData/Roaming/AgentNanoni/logs",
+          "systemLocale": "en-US",
+          "deepLinkScheme": "agent-nanoni",
+          "argv": ["--debug"],
+          "launchUrls": []
+        }
+      }
+    },
+    {
+      "name": "app.isProtocolClient/result",
+      "method": "app.isProtocolClient",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 101,
+        "result": {
+          "registered": true
+        }
+      }
+    },
+    {
+      "name": "app.setProtocolClient/result",
+      "method": "app.setProtocolClient",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 102,
+        "result": {
+          "ok": true
+        }
+      }
+    },
+    {
+      "name": "app.getMetrics/result",
+      "method": "app.getMetrics",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 103,
+        "result": [
+          {
+            "pid": 7001,
+            "type": "server",
+            "cpuPercent": 1.25,
+            "memoryKb": 128000
+          }
+        ]
+      }
+    },
+    {
+      "name": "app.before-quit/result",
+      "method": "app.before-quit",
+      "direction": "host-to-shell",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 104,
+        "result": {
+          "prevented": false
+        }
+      }
+    },
+    {
+      "name": "process.register/result",
+      "method": "process.register",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 105,
+        "result": {
+          "registrationId": "registration-1"
+        }
+      }
+    },
+    {
+      "name": "ipc.invoke/result",
+      "method": "ipc.invoke",
+      "direction": "host-to-shell",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 106,
+        "result": {
+          "result": {
+            "ok": true
+          }
+        }
+      }
+    },
+    {
+      "name": "window.create/result",
+      "method": "window.create",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 107,
+        "result": {
+          "label": "main"
+        }
+      }
+    },
+    {
+      "name": "window.getBounds/result",
+      "method": "window.getBounds",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 108,
+        "result": {
+          "x": 10,
+          "y": 20,
+          "width": 1200,
+          "height": 800,
+          "maximized": false
+        }
+      }
+    },
+    {
+      "name": "window.getState/result",
+      "method": "window.getState",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 109,
+        "result": {
+          "visible": true,
+          "focused": true,
+          "minimized": false,
+          "maximized": false,
+          "fullscreen": false,
+          "destroyed": false
+        }
+      }
+    },
+    {
+      "name": "dialog.openFolder/result",
+      "method": "dialog.openFolder",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 110,
+        "result": {
+          "path": "C:/work"
+        }
+      }
+    },
+    {
+      "name": "dialog.openFiles/result",
+      "method": "dialog.openFiles",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 111,
+        "result": {
+          "paths": ["C:/work/README.md"]
+        }
+      }
+    },
+    {
+      "name": "dialog.message/result",
+      "method": "dialog.message",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 112,
+        "result": {
+          "response": 0
+        }
+      }
+    },
+    {
+      "name": "dialog.error/result",
+      "method": "dialog.error",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 123,
+        "result": {}
+      }
+    },
+    {
+      "name": "menu.setApplication/result",
+      "method": "menu.setApplication",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 124,
+        "result": {}
+      }
+    },
+    {
+      "name": "menu.popup/result",
+      "method": "menu.popup",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 113,
+        "result": {
+          "selectedId": "copy"
+        }
+      }
+    },
+    {
+      "name": "shell.openExternal/result",
+      "method": "shell.openExternal",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 114,
+        "result": {
+          "ok": true
+        }
+      }
+    },
+    {
+      "name": "wsl.registerGuest/result",
+      "method": "wsl.registerGuest",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 115,
+        "result": {
+          "ok": true
+        }
+      }
+    },
+    {
+      "name": "wsl.unregisterGuest/result",
+      "method": "wsl.unregisterGuest",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 116,
+        "result": {
+          "ok": true
+        }
+      }
+    },
+    {
+      "name": "theme.get/result",
+      "method": "theme.get",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 117,
+        "result": {
+          "shouldUseDarkColors": true
+        }
+      }
+    },
+    {
+      "name": "safeStorage.status/result",
+      "method": "safeStorage.status",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 118,
+        "result": {
+          "available": true,
+          "backend": "windows-credential-manager"
+        }
+      }
+    },
+    {
+      "name": "safeStorage.encrypt/result",
+      "method": "safeStorage.encrypt",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 119,
+        "result": {
+          "ciphertextBase64": "c2VjcmV0"
+        }
+      }
+    },
+    {
+      "name": "safeStorage.decrypt/result",
+      "method": "safeStorage.decrypt",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 120,
+        "result": {
+          "plaintext": "secret"
+        }
+      }
+    },
+    {
+      "name": "updater.check/result",
+      "method": "updater.check",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 121,
+        "result": {
+          "available": false
+        }
+      }
+    },
+    {
+      "name": "power.snapshot/result",
+      "method": "power.snapshot",
+      "direction": "shell-to-host",
+      "kind": "response",
+      "envelope": {
+        "jsonrpc": "2.0",
+        "id": 122,
+        "result": {
+          "onBattery": false,
+          "idleSeconds": 42,
+          "idleState": "active",
+          "thermalState": "nominal"
+        }
+      }
+    }
+  ]
+}

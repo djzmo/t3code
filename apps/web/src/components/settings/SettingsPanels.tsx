@@ -40,7 +40,13 @@ import { createModelSelection } from "@t3tools/shared/model";
 import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
 import * as Schema from "effect/Schema";
-import { APP_VERSION, HOSTED_APP_CHANNEL, HOSTED_APP_CHANNEL_LABEL } from "../../branding";
+import {
+  COMPATIBLE_SERVER_VERSION,
+  HOSTED_APP_CHANNEL,
+  HOSTED_APP_CHANNEL_LABEL,
+  PRODUCT_VERSION,
+  UPSTREAM_BASE_TAG,
+} from "../../branding";
 import {
   canCheckForUpdate,
   getDesktopUpdateButtonTooltip,
@@ -221,7 +227,20 @@ function AboutVersionTitle() {
   return (
     <span className="inline-flex items-baseline gap-2">
       <span>Version</span>
-      <code className="text-[11px] font-medium text-muted-foreground">{APP_VERSION}</code>
+      <code className="text-[11px] font-medium text-muted-foreground">{PRODUCT_VERSION}</code>
+      {COMPATIBLE_SERVER_VERSION !== PRODUCT_VERSION ? (
+        <code
+          className="text-[11px] font-medium text-muted-foreground"
+          title="Protocol-compatible server version"
+        >
+          server {COMPATIBLE_SERVER_VERSION}
+        </code>
+      ) : null}
+      {UPSTREAM_BASE_TAG ? (
+        <code className="text-[11px] font-medium text-muted-foreground" title="Upstream base tag">
+          {UPSTREAM_BASE_TAG}
+        </code>
+      ) : null}
     </span>
   );
 }

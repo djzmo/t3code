@@ -83,6 +83,10 @@ const MODE_ARGS = {
   "dev:server": ["run", "--filter=t3", "dev"],
   "dev:web": ["run", "--filter=@t3tools/web", "dev"],
   "dev:desktop": ["run", "--filter=@t3tools/desktop", "--filter=@t3tools/web", "dev"],
+  // The Tauri launcher owns the web graph and the tauri CLI as two children.
+  // Run it through Vite+ so the existing workspace executable resolution and
+  // environment forwarding stay identical to the other dev modes.
+  "dev:tauri": ["exec", "--filter=@t3tools/desktop", "--", "node", "scripts/tauri/dev.mjs"],
 } as const satisfies Record<string, ReadonlyArray<string>>;
 
 type DevMode = keyof typeof MODE_ARGS;
@@ -151,7 +155,7 @@ export class DevRunnerProcessError extends Schema.TaggedErrorClass<DevRunnerProc
   "DevRunnerProcessError",
   {
     operation: Schema.Literals(["spawn", "wait-for-exit"]),
-    mode: Schema.Literals(["dev", "dev:server", "dev:web", "dev:desktop"]),
+    mode: Schema.Literals(["dev", "dev:server", "dev:web", "dev:desktop", "dev:tauri"]),
     executable: Schema.Literal("vp"),
     argumentCount: Schema.Number,
     shell: Schema.Boolean,
@@ -166,7 +170,7 @@ export class DevRunnerProcessError extends Schema.TaggedErrorClass<DevRunnerProc
 export class DevRunnerProcessExitError extends Schema.TaggedErrorClass<DevRunnerProcessExitError>()(
   "DevRunnerProcessExitError",
   {
-    mode: Schema.Literals(["dev", "dev:server", "dev:web", "dev:desktop"]),
+    mode: Schema.Literals(["dev", "dev:server", "dev:web", "dev:desktop", "dev:tauri"]),
     executable: Schema.Literal("vp"),
     argumentCount: Schema.Number,
     shell: Schema.Boolean,
@@ -324,7 +328,7 @@ export function createDevRunnerEnv({
     // by the caller; an unset t3Home here genuinely means "use the default".
     const configuredBaseDir = t3Home?.trim() || undefined;
     const resolvedBaseDir = yield* resolveBaseDir(configuredBaseDir);
-    const isDesktopMode = mode === "dev:desktop";
+    const isDesktopMode = mode === "dev:desktop" || mode === "dev:tauri";
 
     const output: NodeJS.ProcessEnv = {
       ...baseEnv,
@@ -348,7 +352,7 @@ export function createDevRunnerEnv({
     delete output.T3_SERVICE_LAUNCHER_CONTEXT;
     delete output.T3_BOOT_SERVICE_UNIT;
 
-    if (!isDesktopMode) {
+    if (mode !== "dev:desktop") {
       output.T3CODE_PORT = String(serverPort);
       // HOST is Vite's own bind address, and the desktop branch below is the
       // only place we set it. An inherited one (an exported HOST, a container,
@@ -357,7 +361,7 @@ export function createDevRunnerEnv({
       // apps/web/vite.config.ts. Over a shared origin that is invisible: the
       // page loads and only HMR quietly dials the wrong machine.
       delete output.HOST;
-      if (mode === "dev" || mode === "dev:web") {
+      if (mode === "dev" || mode === "dev:web" || mode === "dev:tauri") {
         // Browser dev is single-origin: everything (including /ws) is proxied
         // through Vite, so the client must resolve its backend from
         // window.location.origin rather than a baked-in localhost URL. See
@@ -394,7 +398,7 @@ export function createDevRunnerEnv({
       output.T3CODE_HOST = host;
     }
 
-    if (!isDesktopMode) {
+    if (mode !== "dev:desktop") {
       output.T3CODE_NO_BROWSER = browser === true ? "0" : "1";
     }
 
@@ -720,7 +724,7 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
     if (input.share) {
       if (input.mode === "dev:server") {
         yield* Effect.logInfo("[dev-runner] --share has no effect for dev:server (no web server).");
-      } else if (input.mode === "dev:desktop") {
+      } else if (input.mode === "dev:desktop" || input.mode === "dev:tauri") {
         // Desktop is not single-origin: the renderer gets VITE_HTTP_URL and
         // VITE_WS_URL baked to loopback, so a tailnet visitor would load the UI
         // and then watch it dial its own 127.0.0.1 for the backend. Worse,
@@ -728,7 +732,7 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
         // Electron itself loads the renderer from. Refuse rather than hand out
         // a URL that is broken in a way the user cannot see.
         yield* Effect.logWarning(
-          "[dev-runner] --share is not supported for dev:desktop (the renderer is pinned to loopback). Use `dev`, which runs the whole browser stack.",
+          "[dev-runner] --share is not supported for desktop dev modes (the renderer is pinned to loopback). Use `dev`, which runs the whole browser stack.",
         );
       } else {
         // acquireRelease, not share-then-addFinalizer: the mapping outlives this
