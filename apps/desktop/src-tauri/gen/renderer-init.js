@@ -30,7 +30,7 @@
     value: boot,
   });
 
-  const sync = deepFreeze({"appBranding":null,"systemLocale":null,"localEnvironmentBootstraps":[],"windowFullscreenState":false});
+  const sync = deepFreeze({"appBranding":null,"clientPlatform":"unknown","systemLocale":null,"localEnvironmentBootstraps":[],"windowFullscreenState":false});
   const listenersByChannel = new Map();
   const listenersFor = (channel) => {
     let listeners = listenersByChannel.get(channel);
@@ -123,7 +123,7 @@
     });
   };
 
-  const channels = {"getLocalEnvironmentBearerToken":"desktop:get-local-environment-bearer-token","getClientSettings":"desktop:get-client-settings","setClientSettings":"desktop:set-client-settings","getConnectionCatalog":"desktop:get-connection-catalog","setConnectionCatalog":"desktop:set-connection-catalog","clearConnectionCatalog":"desktop:clear-connection-catalog","discoverSshHosts":"desktop:discover-ssh-hosts","ensureSshEnvironment":"desktop:ensure-ssh-environment","disconnectSshEnvironment":"desktop:disconnect-ssh-environment","fetchSshEnvironmentDescriptor":"desktop:fetch-ssh-environment-descriptor","bootstrapSshBearerSession":"desktop:bootstrap-ssh-bearer-session","fetchSshSessionState":"desktop:fetch-ssh-session-state","issueSshWebSocketTicket":"desktop:issue-ssh-websocket-token","resolveSshPasswordPrompt":"desktop:resolve-ssh-password-prompt","getServerExposureState":"desktop:get-server-exposure-state","setServerExposureMode":"desktop:set-server-exposure-mode","setTailscaleServeEnabled":"desktop:set-tailscale-serve-enabled","getAdvertisedEndpoints":"desktop:get-advertised-endpoints","getWslState":"desktop:get-wsl-state","setWslBackendEnabled":"desktop:set-wsl-backend-enabled","setWslDistro":"desktop:set-wsl-distro","setWslOnly":"desktop:set-wsl-only","pickFolder":"desktop:pick-folder","pickThemeFiles":"desktop:pick-theme-files","setTheme":"desktop:set-theme","showContextMenu":"desktop:context-menu","openExternal":"desktop:open-external","probeRemoteEditors":"desktop:probe-remote-editors","getUpdateState":"desktop:update-get-state","setUpdateChannel":"desktop:update-set-channel","checkForUpdate":"desktop:update-check","downloadUpdate":"desktop:update-download","installUpdate":"desktop:update-install","getAppBranding":"desktop:get-app-branding","getSystemLocale":"desktop:get-system-locale","getLocalEnvironmentBootstraps":"desktop:get-local-environment-bootstraps","getWindowFullscreenState":"desktop:get-window-fullscreen-state"};
+  const channels = {"getLocalEnvironmentBearerToken":"desktop:get-local-environment-bearer-token","getClientSettings":"desktop:get-client-settings","setClientSettings":"desktop:set-client-settings","getConnectionCatalog":"desktop:get-connection-catalog","setConnectionCatalog":"desktop:set-connection-catalog","clearConnectionCatalog":"desktop:clear-connection-catalog","discoverSshHosts":"desktop:discover-ssh-hosts","ensureSshEnvironment":"desktop:ensure-ssh-environment","disconnectSshEnvironment":"desktop:disconnect-ssh-environment","fetchSshEnvironmentDescriptor":"desktop:fetch-ssh-environment-descriptor","bootstrapSshBearerSession":"desktop:bootstrap-ssh-bearer-session","fetchSshSessionState":"desktop:fetch-ssh-session-state","issueSshWebSocketTicket":"desktop:issue-ssh-websocket-token","resolveSshPasswordPrompt":"desktop:resolve-ssh-password-prompt","getServerExposureState":"desktop:get-server-exposure-state","setServerExposureMode":"desktop:set-server-exposure-mode","setTailscaleServeEnabled":"desktop:set-tailscale-serve-enabled","getAdvertisedEndpoints":"desktop:get-advertised-endpoints","getWslState":"desktop:get-wsl-state","setWslBackendEnabled":"desktop:set-wsl-backend-enabled","setWslDistro":"desktop:set-wsl-distro","setWslOnly":"desktop:set-wsl-only","pickFolder":"desktop:pick-folder","pickProjectFavicon":"desktop:pick-project-favicon","pickThemeFiles":"desktop:pick-theme-files","setTheme":"desktop:set-theme","showContextMenu":"desktop:context-menu","openExternal":"desktop:open-external","probeRemoteEditors":"desktop:probe-remote-editors","getUpdateState":"desktop:update-get-state","setUpdateChannel":"desktop:update-set-channel","checkForUpdate":"desktop:update-check","downloadUpdate":"desktop:update-download","installUpdate":"desktop:update-install","getAppBranding":"desktop:get-app-branding","getSystemLocale":"desktop:get-system-locale","getLocalEnvironmentBootstraps":"desktop:get-local-environment-bootstraps","getWindowFullscreenState":"desktop:get-window-fullscreen-state"};
   const pushChannels = {"onSshPasswordPrompt":"desktop:ssh-password-prompt","onMenuAction":"desktop:menu-action","onQuitShortcut":"desktop:quit-shortcut","onWindowFullscreenStateChange":"desktop:window-fullscreen-state","onUpdateState":"desktop:update-state"};
   const call = (method, payload) => invoke(channels[method], payload);
   const onObject = (channel, listener) =>
@@ -149,6 +149,7 @@
 
   const bridge = Object.freeze({
     getAppBranding: () => sync.appBranding,
+    getClientPlatform: () => sync.clientPlatform,
     getSystemLocale: () => sync.systemLocale,
     getLocalEnvironmentBootstraps: () => sync.localEnvironmentBootstraps,
     getLocalEnvironmentBearerToken: () => call("getLocalEnvironmentBearerToken", null),
@@ -180,6 +181,7 @@
     setWslDistro: (distro) => call("setWslDistro", distro),
     setWslOnly: (enabled) => call("setWslOnly", enabled),
     pickFolder: (options) => call("pickFolder", options === undefined ? {} : options),
+    pickProjectFavicon: (initialPath) => call("pickProjectFavicon", initialPath),
     pickThemeFiles: () => call("pickThemeFiles", null),
     setTheme: (theme) => call("setTheme", theme),
     showContextMenu: (items, position) =>

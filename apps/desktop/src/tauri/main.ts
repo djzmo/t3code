@@ -22,7 +22,6 @@ import * as DesktopConnectionCatalogStore from "../app/DesktopConnectionCatalogS
 import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopLifecycle from "../app/DesktopLifecycle.ts";
-import * as DesktopLinuxUrlHandler from "../app/DesktopLinuxUrlHandler.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopShutdown from "../app/DesktopShutdown.ts";
 import * as DesktopState from "../app/DesktopState.ts";
@@ -34,7 +33,6 @@ import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopLocalEnvironmentAuth from "../backend/DesktopLocalEnvironmentAuth.ts";
 import * as DesktopNetworkInterfaces from "../backend/DesktopNetworkInterfaces.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
-import * as DesktopPreReadyPlatform from "../app/DesktopPreReadyPlatform.ts";
 import * as DesktopShellEnvironment from "../shell/DesktopShellEnvironment.ts";
 import * as DesktopSshEnvironment from "../ssh/DesktopSshEnvironment.ts";
 import * as DesktopSshPasswordPrompts from "../ssh/DesktopSshPasswordPrompts.ts";
@@ -42,7 +40,6 @@ import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublish
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
 import * as DesktopWslBackend from "../wsl/DesktopWslBackend.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
-import * as DesktopWslServerTree from "../wsl/DesktopWslServerTree.ts";
 import * as DesktopApplicationMenu from "../window/DesktopApplicationMenu.ts";
 
 import * as TauriApp from "./electron/TauriApp.ts";
@@ -135,6 +132,7 @@ const createRendererInitScripts = (options: TauriHostOptions): ReadonlyArray<str
       boot,
       sync: {
         appBranding,
+        clientPlatform: options.platform,
         systemLocale,
         localEnvironmentBootstraps,
         windowFullscreenState,

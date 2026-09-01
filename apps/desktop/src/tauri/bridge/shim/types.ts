@@ -14,6 +14,7 @@ export type NanoniBootSnapshot = Readonly<Record<string, unknown>>;
  */
 export interface NanoniRendererSyncSnapshot {
   readonly appBranding: DesktopAppBranding | null;
+  readonly clientPlatform: string;
   readonly systemLocale: string | null;
   readonly localEnvironmentBootstraps: readonly DesktopEnvironmentBootstrap[];
   /** Cached because the upstream preload reads this synchronously at boot. */

@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
-import { readFileSync } from "node:fs";
+import * as NodeFS from "node:fs";
 
 import { assert, describe, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
@@ -83,6 +83,7 @@ describe("TauriDialog", () => {
           owner: Option.none(),
           defaultPath: Option.some("/private/secret"),
           filters: [],
+          multiple: false,
         }),
       );
       assert.instanceOf(filesError, TauriDialog.ElectronDialogPickFilesError);
@@ -116,7 +117,7 @@ describe("TauriDialog", () => {
   );
 
   it("does not import Electron or the upstream runtime implementation", () => {
-    const source = readFileSync(new URL("./TauriDialog.ts", import.meta.url), "utf8");
+    const source = NodeFS.readFileSync(new URL("./TauriDialog.ts", import.meta.url), "utf8");
 
     assert.notMatch(source, /^import\s+\*\s+as\s+Electron\s+from\s+["']electron["']/m);
     assert.notMatch(

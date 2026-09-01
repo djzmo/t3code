@@ -207,6 +207,7 @@ export const createNanoniInitScript = (options: NanoniRendererInitScriptOptions)
 
   const bridge = Object.freeze({
     getAppBranding: () => sync.appBranding,
+    getClientPlatform: () => sync.clientPlatform,
     getSystemLocale: () => sync.systemLocale,
     getLocalEnvironmentBootstraps: () => sync.localEnvironmentBootstraps,
     getLocalEnvironmentBearerToken: () => call("getLocalEnvironmentBearerToken", null),
@@ -238,6 +239,7 @@ export const createNanoniInitScript = (options: NanoniRendererInitScriptOptions)
     setWslDistro: (distro) => call("setWslDistro", distro),
     setWslOnly: (enabled) => call("setWslOnly", enabled),
     pickFolder: (options) => call("pickFolder", options === undefined ? {} : options),
+    pickProjectFavicon: (initialPath) => call("pickProjectFavicon", initialPath),
     pickThemeFiles: () => call("pickThemeFiles", null),
     setTheme: (theme) => call("setTheme", theme),
     showContextMenu: (items, position) =>
@@ -290,6 +292,7 @@ export const createDefaultNanoniInitScript = (): string =>
   createNanoniInitScript({
     sync: {
       appBranding: null,
+      clientPlatform: "unknown",
       systemLocale: null,
       localEnvironmentBootstraps: [],
       windowFullscreenState: false,

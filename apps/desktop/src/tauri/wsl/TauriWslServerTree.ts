@@ -28,6 +28,7 @@ export const layer = Layer.effect(
       // The native extraction/preflight path is intentionally deferred to F6;
       // V1.1 preserves the configured server root for callers that select WSL.
       ensure: Effect.succeed({ ok: true, root: environment.serverRoot } as const),
+      cleanupLegacy: Effect.void,
     });
   }),
 );

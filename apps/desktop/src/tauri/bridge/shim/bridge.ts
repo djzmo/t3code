@@ -40,6 +40,7 @@ export const NANONI_BRIDGE_CHANNELS = {
   setWslDistro: IpcChannels.SET_WSL_DISTRO_CHANNEL,
   setWslOnly: IpcChannels.SET_WSL_ONLY_CHANNEL,
   pickFolder: IpcChannels.PICK_FOLDER_CHANNEL,
+  pickProjectFavicon: IpcChannels.PICK_PROJECT_FAVICON_CHANNEL,
   pickThemeFiles: IpcChannels.PICK_THEME_FILES_CHANNEL,
   setTheme: IpcChannels.SET_THEME_CHANNEL,
   showContextMenu: IpcChannels.CONTEXT_MENU_CHANNEL,
@@ -80,6 +81,7 @@ type ResultOf<Method> = Method extends (...args: infer _Args) => infer Result
 
 type NanoniBridgeInvokeMethod = Exclude<
   keyof NanoniDesktopBridge,
+  | "getClientPlatform"
   | "onMenuAction"
   | "onQuitShortcut"
   | "onSshPasswordPrompt"
@@ -124,6 +126,7 @@ export const makeNanoniDesktopBridge = (transport: NanoniBridgeTransport): Nanon
 
   const bridge = {
     getAppBranding: () => transport.sync.appBranding,
+    getClientPlatform: () => transport.sync.clientPlatform,
     getSystemLocale: () => transport.sync.systemLocale,
     getLocalEnvironmentBootstraps: () => transport.sync.localEnvironmentBootstraps,
     getLocalEnvironmentBearerToken: () => invokeMethod("getLocalEnvironmentBearerToken", null),
@@ -165,6 +168,7 @@ export const makeNanoniDesktopBridge = (transport: NanoniBridgeTransport): Nanon
     setWslDistro: (distro) => invokeMethod("setWslDistro", distro),
     setWslOnly: (enabled) => invokeMethod("setWslOnly", enabled),
     pickFolder: (options) => invokeMethod("pickFolder", options === undefined ? {} : options),
+    pickProjectFavicon: (initialPath) => invokeMethod("pickProjectFavicon", initialPath),
     pickThemeFiles: () => invokeMethod("pickThemeFiles", null),
     setTheme: (theme) => invokeMethod("setTheme", theme),
     showContextMenu: <T extends string>(

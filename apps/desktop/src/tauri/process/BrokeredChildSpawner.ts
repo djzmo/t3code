@@ -148,7 +148,7 @@ const toSpawnRequest = (
       stderr: pipeMode(stderr, "stderr"),
       additionalFds: configuredAdditionalFds.fds,
     },
-    stdinStream: stdinInputStream(stdin),
+    stdinStream: stdinInputStream(stdin as ChildProcess.CommandInput | undefined),
     inputStreams: configuredAdditionalFds.inputStreams,
   };
 };

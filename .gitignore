@@ -25,6 +25,7 @@ __screenshots__/
 squashfs-root/
 .vercel
 .gstack/
+.plans/
 dist-electron/
 apps/desktop/dist-tauri-host/
 apps/desktop/src-tauri/binaries/
@@ -34,6 +35,7 @@ apps/desktop/src-tauri/tauri.phase0.conf.json
 .showcase/
 apps/mobile/.showcase/
 artifacts/app-store/screenshots/
+.github/pr-assets/
 native/**/target/
 apps/desktop/src-tauri/target/
 node_modules/

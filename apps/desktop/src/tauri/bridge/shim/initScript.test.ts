@@ -38,6 +38,7 @@ const runInitScript = (window: Record<string, unknown>): void => {
     },
     sync: {
       appBranding: { baseName: "Agent Nanoni", stageLabel: "Dev", displayName: "Agent Nanoni" },
+      clientPlatform: "win32",
       systemLocale: "fr-FR",
       windowFullscreenState: true,
       localEnvironmentBootstraps: [
@@ -65,6 +66,7 @@ describe("Nanoni renderer init script", () => {
 
     const bridge = window.desktopBridge as {
       getAppBranding: () => unknown;
+      getClientPlatform: () => string;
       getSystemLocale: () => unknown;
       getLocalEnvironmentBootstraps: () => unknown;
       getWindowFullscreenState: () => boolean;
@@ -74,6 +76,7 @@ describe("Nanoni renderer init script", () => {
       stageLabel: "Dev",
       displayName: "Agent Nanoni",
     });
+    assert.equal(bridge.getClientPlatform(), "win32");
     assert.equal(bridge.getSystemLocale(), "fr-FR");
     assert.isTrue(bridge.getWindowFullscreenState());
     assert.deepEqual(bridge.getLocalEnvironmentBootstraps(), [
@@ -104,6 +107,7 @@ describe("Nanoni renderer init script", () => {
     runInitScript(window);
     const bridge = window.desktopBridge as {
       getClientSettings: () => Promise<unknown>;
+      pickProjectFavicon: (initialPath?: string) => Promise<unknown>;
       onMenuAction: (listener: (action: string) => void) => () => void;
     };
     const received: unknown[] = [];
@@ -114,7 +118,15 @@ describe("Nanoni renderer init script", () => {
       command: "host_invoke",
       args: { channel: NANONI_BRIDGE_CHANNELS.getClientSettings, payload: null },
     });
-    assert.equal(invocations.length, 2);
+    const faviconResult = await bridge.pickProjectFavicon("C:/project");
+    assert.deepEqual(faviconResult, {
+      command: "host_invoke",
+      args: {
+        channel: NANONI_BRIDGE_CHANNELS.pickProjectFavicon,
+        payload: "C:/project",
+      },
+    });
+    assert.equal(invocations.length, 3);
     assert.equal(invocations[0]?.command, "desktop_events");
     assert.equal(invocations[1]?.command, "host_invoke");
 
@@ -179,6 +191,7 @@ describe("Nanoni renderer init script", () => {
         "fetchSshSessionState",
         "getAdvertisedEndpoints",
         "getAppBranding",
+        "getClientPlatform",
         "getClientSettings",
         "getConnectionCatalog",
         "getLocalEnvironmentBearerToken",
@@ -197,6 +210,7 @@ describe("Nanoni renderer init script", () => {
         "onWindowFullscreenStateChange",
         "openExternal",
         "pickFolder",
+        "pickProjectFavicon",
         "pickThemeFiles",
         "probeRemoteEditors",
         "resolveSshPasswordPrompt",

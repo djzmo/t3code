@@ -64,6 +64,7 @@ export const make = PreviewManager.of({
   reapplyZoom: () => Effect.void,
   hardReload: () => unsupported("hardReload"),
   setColorScheme: () => unsupported("setColorScheme"),
+  setAudioMuted: () => unsupported("setAudioMuted"),
   openDevTools: () => unsupported("openDevTools"),
   clearCookies: () => unsupported("clearCookies"),
   clearCache: () => unsupported("clearCache"),
